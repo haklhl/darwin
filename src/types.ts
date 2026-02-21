@@ -48,7 +48,8 @@ export type ToolName =
   | 'start_service'
   | 'stop_service'
   | 'check_usage'
-  | 'ask_operator';
+  | 'ask_operator'
+  | 'post_tweet';
 
 export interface ToolCall {
   name: ToolName;

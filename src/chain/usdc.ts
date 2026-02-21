@@ -46,6 +46,45 @@ export async function getUsdcBalance(address?: string): Promise<number> {
   return humanReadable;
 }
 
+// Aave V3 aUSDC token on Base mainnet
+const AUSDC_BASE = '0x4e65fE4DbA92790696d040ac24Aa414708F5c0AB' as const;
+
+/**
+ * Get the Aave V3 aUSDC balance for an address (human-readable).
+ * Represents USDC deposited in Aave V3 earning yield.
+ * Defaults to Darwin's own wallet address.
+ */
+export async function getAaveUsdcBalance(address?: string): Promise<number> {
+  const client = getPublicClient();
+  const target = (address ?? getWalletAddress()) as Address;
+  try {
+    const balance = await client.readContract({
+      address: AUSDC_BASE,
+      abi: ERC20_ABI,
+      functionName: 'balanceOf',
+      args: [target],
+    });
+    const humanReadable = Number(formatUnits(balance, 6));
+    logger.debug('chain', `aUSDC (Aave V3) balance for ${target}: ${humanReadable}`);
+    return humanReadable;
+  } catch (e) {
+    logger.warn('chain', 'Failed to fetch aUSDC balance', { error: String(e) });
+    return 0;
+  }
+}
+
+/**
+ * Get total effective USDC value (wallet USDC + Aave V3 aUSDC).
+ * Use for survival tier calculations to avoid false 'dead' states.
+ */
+export async function getTotalUsdcValue(address?: string): Promise<number> {
+  const [wallet, aave] = await Promise.all([
+    getUsdcBalance(address),
+    getAaveUsdcBalance(address),
+  ]);
+  return wallet + aave;
+}
+
 /**
  * Get the ETH balance for an address (in ether).
  * Defaults to Darwin's own wallet address.

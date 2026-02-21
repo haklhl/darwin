@@ -127,6 +127,7 @@ function buildToolsBlock(): string {
 | memory_store | 存储长期记忆 |
 | memory_retrieve | 检索记忆 |
 | soul_reflect | 自我反思 |
+| post_tweet | 发推文到 X/Twitter（280字符限制）|
 | check_usage | 查看 CLI 用量 |
 | self_modify | 修改自身代码（需审计）|
 | ask_operator | 向卡卡西求助并等待回复（遇到障碍时用）|

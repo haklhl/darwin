@@ -4,7 +4,7 @@
 
 import type { SurvivalState, SurvivalTier } from '../types.js';
 import { SURVIVAL_THRESHOLDS } from '../types.js';
-import { getUsdcBalance, getEthBalance } from '../chain/usdc.js';
+import { getUsdcBalance, getEthBalance, getAaveUsdcBalance, getTotalUsdcValue } from '../chain/usdc.js';
 import { kvGet, kvSet } from '../state/database.js';
 import { logger } from '../observability/logger.js';
 
@@ -16,13 +16,18 @@ let lastKnownTier: SurvivalTier | null = null;
  * and determining the appropriate tier.
  */
 export async function checkSurvivalState(): Promise<SurvivalState> {
-  const usdcBalance = await getUsdcBalance();
-  const ethBalance = await getEthBalance();
-  const tier = determineTier(usdcBalance);
+  const [usdcBalance, aaveUsdcBalance, ethBalance] = await Promise.all([
+    getUsdcBalance(),
+    getAaveUsdcBalance(),
+    getEthBalance(),
+  ]);
+  // Total effective USDC includes both wallet balance and Aave V3 aUSDC deposits
+  const totalUsdcValue = usdcBalance + aaveUsdcBalance;
+  const tier = determineTier(totalUsdcValue);
 
   const state: SurvivalState = {
     tier,
-    usdcBalance,
+    usdcBalance: totalUsdcValue, // Report total effective value (wallet + DeFi)
     ethBalance,
     lastChecked: Date.now(),
   };
@@ -37,7 +42,9 @@ export async function checkSurvivalState(): Promise<SurvivalState> {
   appendSurvivalHistory(tier);
 
   logger.info('survival', `Survival check: ${tier}`, {
-    usdcBalance,
+    walletUsdc: usdcBalance,
+    aaveUsdc: aaveUsdcBalance,
+    totalUsdc: totalUsdcValue,
     ethBalance,
     tier,
   });

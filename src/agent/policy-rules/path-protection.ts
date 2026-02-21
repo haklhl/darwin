@@ -25,6 +25,7 @@ const PROTECTED_PATHS: Array<{ pattern: RegExp; description: string }> = [
   { pattern: /\.env\./i, description: 'environment file (may contain secrets)' },
   { pattern: /credentials/i, description: 'credentials file' },
   { pattern: /secret/i, description: 'secrets file' },
+  { pattern: /x_credentials/i, description: 'X/Twitter API credentials' },
 ];
 
 /** Tools that perform file operations */

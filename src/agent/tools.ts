@@ -12,6 +12,7 @@ import { getUsdcBalance, getEthBalance, transferUsdc } from '../chain/usdc.js';
 import { executeStrategy, getAvailableStrategies, withdrawAave } from '../chain/defi.js';
 import { getWalletAddress } from '../identity/wallet.js';
 import { getLatestUsage, getSessionResetsAt, getRateLimitStatus } from '../inference/usage-tracker.js';
+import { postTweet } from '../social/x-client.js';
 import { selectModel } from '../inference/model-strategy.js';
 import type { ToolCall, ToolResult, ToolName } from '../types.js';
 
@@ -158,6 +159,14 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
       { name: 'reason', type: 'string', description: 'Reason for the modification', required: true },
     ],
     category: 'system',
+  },
+  {
+    name: 'post_tweet',
+    description: 'Post a tweet on X (Twitter). Max 280 characters.',
+    parameters: [
+      { name: 'text', type: 'string', description: 'Tweet content (max 280 chars)', required: true },
+    ],
+    category: 'network',
   },
   {
     name: 'ask_operator',
@@ -535,6 +544,26 @@ toolHandlers['transfer_usdc'] = async (args: Record<string, unknown>): Promise<T
     const errMsg = error instanceof Error ? error.message : String(error);
     logger.error('tools', 'transfer_usdc failed', { error: errMsg });
     return { name: 'transfer_usdc', success: false, output: '', error: errMsg };
+  }
+};
+
+// --- Real handler: post_tweet ---
+toolHandlers['post_tweet'] = async (args: Record<string, unknown>): Promise<ToolResult> => {
+  const text = String(args.text ?? '');
+  if (!text) {
+    return { name: 'post_tweet', success: false, output: '', error: 'No text provided' };
+  }
+  if (text.length > 280) {
+    return { name: 'post_tweet', success: false, output: '', error: `Tweet too long: ${text.length}/280 chars` };
+  }
+  try {
+    const url = await postTweet(text);
+    logger.info('tools', 'post_tweet: tweet posted', { url });
+    return { name: 'post_tweet', success: true, output: `Tweet posted: ${url}` };
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    logger.error('tools', 'post_tweet failed', { error: errMsg });
+    return { name: 'post_tweet', success: false, output: '', error: errMsg };
   }
 };
 
