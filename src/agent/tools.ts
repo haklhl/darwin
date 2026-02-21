@@ -5,6 +5,10 @@
 import { logger } from '../observability/logger.js';
 import { sendToOperator } from '../telegram/bot.js';
 import { kvSet } from '../state/database.js';
+import { getUsdcBalance, getEthBalance } from '../chain/usdc.js';
+import { getWalletAddress } from '../identity/wallet.js';
+import { getLatestUsage, getSessionResetsAt, getRateLimitStatus } from '../inference/usage-tracker.js';
+import { selectModel } from '../inference/model-strategy.js';
 import type { ToolCall, ToolResult, ToolName } from '../types.js';
 
 export interface ToolParameter {
@@ -203,6 +207,67 @@ toolHandlers['send_message'] = async (args: Record<string, unknown>): Promise<To
     success: sent,
     output: sent ? 'Message sent to operator via Telegram' : 'Failed to send message',
   };
+};
+
+// Register real handler for check_balance (on-chain RPC)
+toolHandlers['check_balance'] = async (_args: Record<string, unknown>): Promise<ToolResult> => {
+  try {
+    const address = getWalletAddress();
+    const [usdcBalance, ethBalance] = await Promise.all([
+      getUsdcBalance(),
+      getEthBalance(),
+    ]);
+
+    const output = [
+      `Wallet: ${address}`,
+      `Chain: Base (chainId 8453)`,
+      `USDC: $${usdcBalance.toFixed(2)}`,
+      `ETH: ${ethBalance.toFixed(6)}`,
+    ].join('\n');
+
+    logger.info('tools', 'check_balance: real balance fetched', { usdcBalance, ethBalance });
+
+    return { name: 'check_balance', success: true, output };
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    logger.error('tools', 'check_balance failed', { error: errMsg });
+    return { name: 'check_balance', success: false, output: '', error: `Balance check failed: ${errMsg}` };
+  }
+};
+
+// Register real handler for check_usage (token usage tracker)
+toolHandlers['check_usage'] = async (_args: Record<string, unknown>): Promise<ToolResult> => {
+  try {
+    const usage = getLatestUsage();
+    const model = selectModel(usage, 'conversation');
+    const sessionResets = getSessionResetsAt();
+    const rlStatus = getRateLimitStatus();
+
+    const fmt = (n: number) => {
+      if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+      if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+      return String(n);
+    };
+
+    const lines = [
+      `Session (5h): ${usage.sessionPercent.toFixed(1)}% (${fmt(usage.sessionTokens)} tokens)`,
+      `Weekly All Models: ${usage.weeklyAllPercent.toFixed(1)}% (${fmt(usage.weeklyAllTokens)} tokens)`,
+      `Weekly Sonnet: ${usage.weeklySonnetPercent.toFixed(1)}% (${fmt(usage.weeklySonnetTokens)} tokens)`,
+      `Trend: ${usage.trend}`,
+      `Current Model: ${model}`,
+      `Rate Limit: ${rlStatus}`,
+    ];
+
+    if (sessionResets > Date.now()) {
+      const mins = Math.round((sessionResets - Date.now()) / 60_000);
+      lines.push(`Session resets in: ${Math.floor(mins / 60)}h${mins % 60}m`);
+    }
+
+    return { name: 'check_usage', success: true, output: lines.join('\n') };
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    return { name: 'check_usage', success: false, output: '', error: `Usage check failed: ${errMsg}` };
+  }
 };
 
 // Register real handler for ask_operator (Telegram + sleep/wait)
