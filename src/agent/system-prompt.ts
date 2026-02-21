@@ -123,8 +123,7 @@ function buildToolsBlock(): string {
 | execute_defi | 执行 DeFi 操作（swap, 提供流动性等）|
 | read_file | 读取文件 |
 | write_file | 写入文件 |
-| run_command | 执行 shell 命令 |
-| search_web | 搜索互联网 |
+| run_command | 执行 shell 命令（也可用 curl 搜索/抓取网页）|
 | memory_store | 存储长期记忆 |
 | memory_retrieve | 检索记忆 |
 | soul_reflect | 自我反思 |

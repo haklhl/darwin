@@ -40,7 +40,6 @@ export type ToolName =
   | 'read_file'
   | 'write_file'
   | 'run_command'
-  | 'search_web'
   | 'send_message'
   | 'self_modify'
   | 'memory_store'

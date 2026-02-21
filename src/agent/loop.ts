@@ -28,7 +28,7 @@ import type {
 const MAX_IDLE_TURNS = 3;
 const MAX_REPETITIVE_TURNS = 3;
 const READ_ONLY_TOOLS = new Set([
-  'check_balance', 'check_usage', 'memory_retrieve', 'soul_reflect', 'read_file', 'search_web',
+  'check_balance', 'check_usage', 'memory_retrieve', 'soul_reflect', 'read_file',
 ]);
 
 const DEFAULT_MAX_STEPS = 10;

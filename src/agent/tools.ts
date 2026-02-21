@@ -89,15 +89,6 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
     category: 'system',
   },
   {
-    name: 'search_web',
-    description: 'Search the web for information',
-    parameters: [
-      { name: 'query', type: 'string', description: 'Search query', required: true },
-      { name: 'maxResults', type: 'number', description: 'Maximum number of results (default 5)', required: false },
-    ],
-    category: 'network',
-  },
-  {
     name: 'memory_store',
     description: 'Store information in long-term memory',
     parameters: [
