@@ -8,7 +8,7 @@ import { isAgentLoopBusy } from '../agent/loop.js';
 import { checkSurvivalState } from '../survival/monitor.js';
 import { loadSoul } from '../soul/model.js';
 import { getLatestMetrics } from '../observability/metrics.js';
-import { getLatestUsage } from '../inference/usage-tracker.js';
+import { getLatestUsage, getSessionResetsAt, getRateLimitStatus } from '../inference/usage-tracker.js';
 import { selectModel } from '../inference/model-strategy.js';
 import { getDatabase, insertInboxMessage, insertWakeEvent, isEmergencyStopped, setEmergencyStop, kvGet, kvSet } from '../state/database.js';
 
@@ -154,6 +154,19 @@ async function handleCommand(chatId: number, text: string): Promise<void> {
         usageMsg += `  Resets Sat 23:00 UTC\n\n`;
         usageMsg += `Weekly Sonnet Only:\n  ${bar(usage.weeklySonnetPercent)} ${usage.weeklySonnetPercent.toFixed(1)}% (${fmt(usage.weeklySonnetTokens)} tokens)\n`;
         usageMsg += `  Resets Sat 23:00 UTC\n\n`;
+        const sessionResets = getSessionResetsAt();
+        if (sessionResets > Date.now()) {
+          const mins = Math.round((sessionResets - Date.now()) / 60_000);
+          const h = Math.floor(mins / 60);
+          const m = mins % 60;
+          usageMsg += `Session resets in: ${h}h${m}m\n`;
+        }
+
+        const rlStatus = getRateLimitStatus();
+        if (rlStatus === 'rejected') {
+          usageMsg += `⛔ Rate limit: REJECTED\n`;
+        }
+
         usageMsg += `趋势: ${usage.trend === 'rising' ? '📈 上升' : usage.trend === 'falling' ? '📉 下降' : '➡️ 稳定'}\n`;
         usageMsg += `当前模型: ${model.toUpperCase()}`;
 

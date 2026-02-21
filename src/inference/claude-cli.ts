@@ -1,10 +1,11 @@
 // ============================================================
 // Darwin - Claude CLI Subprocess Interface
+// Uses stream-json mode to capture rate_limit_event data.
 // ============================================================
 
 import { spawn } from 'child_process';
 import { logger } from '../observability/logger.js';
-import { recordCallUsage } from './usage-tracker.js';
+import { recordCallUsage, updateRateLimitInfo } from './usage-tracker.js';
 import type { InferenceRequest, InferenceResult, UsageInfo, TokenUsage } from './types.js';
 
 const MODEL_MAP: Record<string, string> = {
@@ -15,14 +16,20 @@ const MODEL_MAP: Record<string, string> = {
 
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes
 
+/** Parsed events from stream-json output */
+interface StreamEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
 /**
- * Call Claude CLI as a subprocess with the given request.
- * Uses `claude --print --output-format json` and passes prompt via stdin.
+ * Call Claude CLI as a subprocess.
+ * Uses `--output-format stream-json --verbose` to capture rate limit events.
  */
 export async function callClaude(request: InferenceRequest): Promise<InferenceResult> {
   const startTime = Date.now();
 
-  const args: string[] = ['--print', '--output-format', 'json'];
+  const args: string[] = ['--print', '--output-format', 'stream-json', '--verbose'];
 
   if (request.model) {
     const mapped = MODEL_MAP[request.model];
@@ -42,22 +49,29 @@ export async function callClaude(request: InferenceRequest): Promise<InferenceRe
   logger.debug('claude-cli', 'Spawning claude subprocess', {
     model: request.model ?? 'default',
     promptLength: request.prompt.length,
-    args,
   });
 
   try {
-    const result = await spawnClaude(args, request.prompt, DEFAULT_TIMEOUT_MS);
+    const rawOutput = await spawnClaude(args, request.prompt, DEFAULT_TIMEOUT_MS);
     const durationMs = Date.now() - startTime;
 
-    // Attempt to parse JSON response
-    let content: string;
-    let tokenUsage: TokenUsage | undefined;
-    try {
-      const parsed = JSON.parse(result) as Record<string, unknown>;
-      content = (parsed.result ?? parsed.content ?? parsed.response ?? result) as string;
+    // Parse stream-json: multiple JSON objects, one per line
+    const events = parseStreamEvents(rawOutput);
 
-      // Extract token usage from CLI JSON response
-      const usage = parsed.usage as Record<string, unknown> | undefined;
+    // Find the result event
+    const resultEvent = events.find(e => e.type === 'result');
+    // Find rate_limit_event(s)
+    const rateLimitEvents = events.filter(e => e.type === 'rate_limit_event');
+
+    // Extract content from result
+    let content = '';
+    let tokenUsage: TokenUsage | undefined;
+
+    if (resultEvent) {
+      content = (resultEvent.result as string) ?? '';
+
+      // Extract token usage
+      const usage = resultEvent.usage as Record<string, unknown> | undefined;
       if (usage) {
         tokenUsage = {
           inputTokens: (usage.input_tokens as number) ?? 0,
@@ -66,8 +80,8 @@ export async function callClaude(request: InferenceRequest): Promise<InferenceRe
           cacheReadTokens: (usage.cache_read_input_tokens as number) ?? 0,
         };
 
-        // Record usage for tracking (determine actual model from modelUsage or request)
-        const modelUsage = parsed.modelUsage as Record<string, unknown> | undefined;
+        // Determine actual model from modelUsage
+        const modelUsage = resultEvent.modelUsage as Record<string, unknown> | undefined;
         let actualModel = request.model ?? 'sonnet';
         if (modelUsage) {
           const modelKeys = Object.keys(modelUsage);
@@ -81,9 +95,26 @@ export async function callClaude(request: InferenceRequest): Promise<InferenceRe
 
         recordCallUsage(actualModel, tokenUsage);
       }
-    } catch {
-      // If not valid JSON, use raw output
-      content = result;
+    } else {
+      // Fallback: try to parse entire output as single JSON (old format compat)
+      try {
+        const parsed = JSON.parse(rawOutput) as Record<string, unknown>;
+        content = (parsed.result ?? parsed.content ?? parsed.response ?? rawOutput) as string;
+      } catch {
+        content = rawOutput;
+      }
+    }
+
+    // Process rate limit events
+    for (const rle of rateLimitEvents) {
+      const info = rle.rate_limit_info as Record<string, unknown> | undefined;
+      if (info) {
+        updateRateLimitInfo({
+          status: (info.status as string) ?? 'unknown',
+          resetsAt: (info.resetsAt as number) ?? 0,
+          rateLimitType: (info.rateLimitType as string) ?? 'unknown',
+        });
+      }
     }
 
     logger.info('claude-cli', 'Claude response received', {
@@ -91,6 +122,7 @@ export async function callClaude(request: InferenceRequest): Promise<InferenceRe
       durationMs,
       responseLength: content.length,
       tokens: tokenUsage ? tokenUsage.inputTokens + tokenUsage.outputTokens : undefined,
+      rateLimits: rateLimitEvents.length,
     });
 
     return {
@@ -112,6 +144,30 @@ export async function callClaude(request: InferenceRequest): Promise<InferenceRe
       error: errMsg,
     };
   }
+}
+
+/**
+ * Parse newline-delimited JSON events from stream-json output.
+ */
+function parseStreamEvents(raw: string): StreamEvent[] {
+  const events: StreamEvent[] = [];
+  const lines = raw.split('\n');
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || !trimmed.startsWith('{')) continue;
+
+    try {
+      const parsed = JSON.parse(trimmed) as StreamEvent;
+      if (parsed.type) {
+        events.push(parsed);
+      }
+    } catch {
+      // Skip unparseable lines
+    }
+  }
+
+  return events;
 }
 
 /**

@@ -22,9 +22,11 @@ const WEEKLY_RESET_HOUR = 23; // 23:00 UTC
 // --- KV Keys ---
 const KV_SESSION_START = 'usage_session_start';
 const KV_SESSION_TOKENS = 'usage_session_tokens';
+const KV_SESSION_RESETS_AT = 'usage_session_resets_at'; // from rate_limit_event
 const KV_WEEKLY_RESET = 'usage_weekly_reset_at';
 const KV_WEEKLY_ALL_TOKENS = 'usage_weekly_all_tokens';
 const KV_WEEKLY_SONNET_TOKENS = 'usage_weekly_sonnet_tokens';
+const KV_RATE_LIMIT_STATUS = 'usage_rate_limit_status'; // 'allowed' or 'rejected'
 
 // --- Core Functions ---
 
@@ -111,14 +113,78 @@ export function getLatestUsage(): UsageState {
   };
 }
 
+/**
+ * Get the session reset time (from rate_limit_event or estimated).
+ * Returns epoch ms, or 0 if unknown.
+ */
+export function getSessionResetsAt(): number {
+  const real = kvGetNumber(KV_SESSION_RESETS_AT);
+  if (real && real > Date.now()) return real;
+
+  // Fallback estimate
+  const sessionStart = kvGetNumber(KV_SESSION_START);
+  if (sessionStart) return sessionStart + SESSION_WINDOW_MS;
+  return 0;
+}
+
+/**
+ * Get the rate limit status from the last API call.
+ */
+export function getRateLimitStatus(): string {
+  return kvGet(KV_RATE_LIMIT_STATUS) ?? 'unknown';
+}
+
+// --- Rate Limit Info from CLI ---
+
+export interface RateLimitInfo {
+  status: string;        // 'allowed' | 'rejected'
+  resetsAt: number;      // epoch seconds
+  rateLimitType: string; // 'five_hour' etc.
+}
+
+/**
+ * Update rate limit info from Claude CLI's rate_limit_event.
+ * This gives us the real session window reset time.
+ */
+export function updateRateLimitInfo(info: RateLimitInfo): void {
+  if (info.rateLimitType === 'five_hour' && info.resetsAt > 0) {
+    const resetsAtMs = info.resetsAt * 1000; // Convert epoch seconds to ms
+    kvSetNumber(KV_SESSION_RESETS_AT, resetsAtMs);
+    kvSet(KV_RATE_LIMIT_STATUS, info.status);
+
+    logger.debug('usage-tracker', 'Rate limit info updated', {
+      type: info.rateLimitType,
+      status: info.status,
+      resetsAt: new Date(resetsAtMs).toISOString(),
+    });
+
+    // If the session was rejected, we hit the limit
+    if (info.status === 'rejected') {
+      logger.warn('usage-tracker', 'Session rate limit hit! Tokens may be near cap.');
+    }
+  }
+}
+
 // --- Window Reset Logic ---
 
 function maybeResetSession(now: number): void {
+  // Use real reset time from rate_limit_event if available
+  const realResetAt = kvGetNumber(KV_SESSION_RESETS_AT);
+  if (realResetAt && now >= realResetAt) {
+    // Session window has reset according to the server
+    kvSetNumber(KV_SESSION_START, now);
+    kvSetNumber(KV_SESSION_TOKENS, 0);
+    kvSetNumber(KV_SESSION_RESETS_AT, 0); // Clear until next rate_limit_event
+    logger.debug('usage-tracker', 'Session window reset (server-confirmed)');
+    return;
+  }
+
+  // Fallback: estimate based on 5h window
   const sessionStart = kvGetNumber(KV_SESSION_START);
   if (!sessionStart || (now - sessionStart) >= SESSION_WINDOW_MS) {
     kvSetNumber(KV_SESSION_START, now);
     kvSetNumber(KV_SESSION_TOKENS, 0);
-    logger.debug('usage-tracker', 'Session window reset');
+    logger.debug('usage-tracker', 'Session window reset (estimated)');
   }
 }
 
