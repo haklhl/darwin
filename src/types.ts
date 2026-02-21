@@ -138,11 +138,24 @@ export interface ClaudeResponse {
 }
 
 export interface UsageState {
+  /** Current session usage % (resets every ~5h) */
+  sessionPercent: number;
+  /** Weekly all-models usage % (resets Saturday 23:00 UTC) */
+  weeklyAllPercent: number;
+  /** Weekly Sonnet-only usage % (resets Saturday 23:00 UTC) */
+  weeklySonnetPercent: number;
+  /** Raw token counts for display */
+  sessionTokens: number;
+  weeklyAllTokens: number;
+  weeklySonnetTokens: number;
+  /** Trend over last 6 hours */
+  trend: 'rising' | 'stable' | 'falling';
+
+  // Legacy compat fields (derived)
   currentPercent: number;
   weeklyPercent: number;
   dayOfWeek: number;
   resetDay: number;
-  trend: 'rising' | 'stable' | 'falling';
 }
 
 export interface UsageSnapshot {

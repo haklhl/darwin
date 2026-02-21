@@ -1,70 +1,203 @@
 // ============================================================
-// Darwin - Usage Tracking
+// Darwin - Usage Tracking (3-window: session, weekly all, weekly Sonnet)
 // ============================================================
 
-import { getDatabase } from '../state/database.js';
+import { getDatabase, kvGet, kvSet, kvGetNumber, kvSetNumber } from '../state/database.js';
 import { logger } from '../observability/logger.js';
 import type { UsageState } from '../types.js';
+import type { TokenUsage } from './types.js';
+
+// --- Configuration ---
+// Token budgets per window (configurable via KV, these are defaults)
+const DEFAULT_SESSION_BUDGET = 500_000;      // tokens per 5h session
+const DEFAULT_WEEKLY_ALL_BUDGET = 5_000_000; // tokens per week (all models)
+const DEFAULT_WEEKLY_SONNET_BUDGET = 3_000_000; // tokens per week (Sonnet only)
+
+const SESSION_WINDOW_MS = 5 * 60 * 60_000; // 5 hours
+
+// Weekly reset: Saturday 23:00 UTC
+const WEEKLY_RESET_DAY = 6;   // Saturday (0=Sun, 6=Sat)
+const WEEKLY_RESET_HOUR = 23; // 23:00 UTC
+
+// --- KV Keys ---
+const KV_SESSION_START = 'usage_session_start';
+const KV_SESSION_TOKENS = 'usage_session_tokens';
+const KV_WEEKLY_RESET = 'usage_weekly_reset_at';
+const KV_WEEKLY_ALL_TOKENS = 'usage_weekly_all_tokens';
+const KV_WEEKLY_SONNET_TOKENS = 'usage_weekly_sonnet_tokens';
+
+// --- Core Functions ---
 
 /**
- * Record a usage snapshot into the database.
+ * Record token usage from a single Claude CLI call.
+ * Called automatically after each callClaude() invocation.
  */
-export function recordUsageSnapshot(percent: number, model: string, rawOutput: string): void {
-  const db = getDatabase();
+export function recordCallUsage(model: string, tokens: TokenUsage): void {
+  const now = Date.now();
 
-  try {
-    db.prepare(`
-      INSERT INTO usage_snapshots (timestamp, percent, model, raw_output)
-      VALUES (?, ?, ?, ?)
-    `).run(Date.now(), percent, model, rawOutput);
+  // Check & reset windows if needed
+  maybeResetSession(now);
+  maybeResetWeekly(now);
 
-    logger.debug('usage-tracker', 'Usage snapshot recorded', { percent, model });
-  } catch (error) {
-    const errMsg = error instanceof Error ? error.message : String(error);
-    logger.error('usage-tracker', 'Failed to record usage snapshot', { error: errMsg });
+  // Effective tokens = input + output (cache creation counts, cache reads are discounted)
+  const effectiveTokens = tokens.inputTokens + tokens.outputTokens + tokens.cacheCreationTokens;
+
+  // Accumulate session tokens
+  const sessionTokens = (kvGetNumber(KV_SESSION_TOKENS) ?? 0) + effectiveTokens;
+  kvSetNumber(KV_SESSION_TOKENS, sessionTokens);
+
+  // Accumulate weekly all-models tokens
+  const weeklyAllTokens = (kvGetNumber(KV_WEEKLY_ALL_TOKENS) ?? 0) + effectiveTokens;
+  kvSetNumber(KV_WEEKLY_ALL_TOKENS, weeklyAllTokens);
+
+  // Accumulate weekly Sonnet tokens (only if model is Sonnet)
+  if (model === 'sonnet' || model.includes('sonnet')) {
+    const weeklySonnetTokens = (kvGetNumber(KV_WEEKLY_SONNET_TOKENS) ?? 0) + effectiveTokens;
+    kvSetNumber(KV_WEEKLY_SONNET_TOKENS, weeklySonnetTokens);
+  }
+
+  // Also record snapshot for trend analysis
+  const maxPercent = Math.max(
+    sessionTokens / getSessionBudget() * 100,
+    weeklyAllTokens / getWeeklyAllBudget() * 100,
+    (kvGetNumber(KV_WEEKLY_SONNET_TOKENS) ?? 0) / getWeeklySonnetBudget() * 100,
+  );
+  recordUsageSnapshot(Math.min(100, maxPercent), model);
+
+  logger.debug('usage-tracker', 'Usage recorded', {
+    model,
+    effectiveTokens,
+    sessionTokens,
+    weeklyAllTokens,
+  });
+}
+
+/**
+ * Get the current usage state with 3 percentages.
+ */
+export function getLatestUsage(): UsageState {
+  const now = Date.now();
+
+  // Check & reset windows
+  maybeResetSession(now);
+  maybeResetWeekly(now);
+
+  const sessionTokens = kvGetNumber(KV_SESSION_TOKENS) ?? 0;
+  const weeklyAllTokens = kvGetNumber(KV_WEEKLY_ALL_TOKENS) ?? 0;
+  const weeklySonnetTokens = kvGetNumber(KV_WEEKLY_SONNET_TOKENS) ?? 0;
+
+  const sessionPercent = Math.min(100, sessionTokens / getSessionBudget() * 100);
+  const weeklyAllPercent = Math.min(100, weeklyAllTokens / getWeeklyAllBudget() * 100);
+  const weeklySonnetPercent = Math.min(100, weeklySonnetTokens / getWeeklySonnetBudget() * 100);
+
+  const trend = getUsageTrend(6);
+  const dayOfWeek = new Date(now).getUTCDay();
+
+  // Legacy compat: currentPercent = max of all, weeklyPercent = weeklyAll
+  const currentPercent = Math.max(sessionPercent, weeklyAllPercent, weeklySonnetPercent);
+
+  return {
+    sessionPercent,
+    weeklyAllPercent,
+    weeklySonnetPercent,
+    sessionTokens,
+    weeklyAllTokens,
+    weeklySonnetTokens,
+    trend,
+    currentPercent,
+    weeklyPercent: weeklyAllPercent,
+    dayOfWeek,
+    resetDay: WEEKLY_RESET_DAY,
+  };
+}
+
+// --- Window Reset Logic ---
+
+function maybeResetSession(now: number): void {
+  const sessionStart = kvGetNumber(KV_SESSION_START);
+  if (!sessionStart || (now - sessionStart) >= SESSION_WINDOW_MS) {
+    kvSetNumber(KV_SESSION_START, now);
+    kvSetNumber(KV_SESSION_TOKENS, 0);
+    logger.debug('usage-tracker', 'Session window reset');
+  }
+}
+
+function maybeResetWeekly(now: number): void {
+  const lastReset = kvGetNumber(KV_WEEKLY_RESET);
+  const nextReset = lastReset ? lastReset + getNextWeeklyResetMs(lastReset) : getNextWeeklyResetTimestamp(now);
+
+  if (!lastReset || now >= nextReset) {
+    kvSetNumber(KV_WEEKLY_RESET, now);
+    kvSetNumber(KV_WEEKLY_ALL_TOKENS, 0);
+    kvSetNumber(KV_WEEKLY_SONNET_TOKENS, 0);
+    logger.info('usage-tracker', 'Weekly usage counters reset (Saturday 23:00 UTC)');
   }
 }
 
 /**
- * Get the latest usage state by reading recent snapshots and computing trend.
+ * Calculate milliseconds until the next weekly reset from a given timestamp.
  */
-export function getLatestUsage(): UsageState {
+function getNextWeeklyResetMs(fromMs: number): number {
+  const from = new Date(fromMs);
+  const target = new Date(fromMs);
+
+  // Find next Saturday 23:00 UTC
+  target.setUTCHours(WEEKLY_RESET_HOUR, 0, 0, 0);
+  const currentDay = from.getUTCDay();
+  let daysUntilSat = (WEEKLY_RESET_DAY - currentDay + 7) % 7;
+  if (daysUntilSat === 0 && from.getUTCHours() >= WEEKLY_RESET_HOUR) {
+    daysUntilSat = 7; // Already past this Saturday's reset
+  }
+  target.setUTCDate(target.getUTCDate() + daysUntilSat);
+
+  return target.getTime() - from.getTime();
+}
+
+/**
+ * Get the timestamp of the most recent Saturday 23:00 UTC reset point.
+ */
+function getNextWeeklyResetTimestamp(now: number): number {
+  const d = new Date(now);
+  d.setUTCHours(WEEKLY_RESET_HOUR, 0, 0, 0);
+  const currentDay = d.getUTCDay();
+  let daysUntilSat = (WEEKLY_RESET_DAY - currentDay + 7) % 7;
+  if (daysUntilSat === 0 && new Date(now).getUTCHours() >= WEEKLY_RESET_HOUR) {
+    daysUntilSat = 7;
+  }
+  d.setUTCDate(d.getUTCDate() + daysUntilSat);
+  return d.getTime();
+}
+
+// --- Budget Getters (allow override via KV) ---
+
+function getSessionBudget(): number {
+  return kvGetNumber('usage_budget_session') ?? DEFAULT_SESSION_BUDGET;
+}
+
+function getWeeklyAllBudget(): number {
+  return kvGetNumber('usage_budget_weekly_all') ?? DEFAULT_WEEKLY_ALL_BUDGET;
+}
+
+function getWeeklySonnetBudget(): number {
+  return kvGetNumber('usage_budget_weekly_sonnet') ?? DEFAULT_WEEKLY_SONNET_BUDGET;
+}
+
+// --- Snapshot Recording (for trend analysis) ---
+
+function recordUsageSnapshot(percent: number, model: string): void {
   const db = getDatabase();
-
-  // Get the most recent snapshot
-  const latest = db.prepare(`
-    SELECT percent, timestamp FROM usage_snapshots
-    ORDER BY timestamp DESC LIMIT 1
-  `).get() as { percent: number; timestamp: number } | undefined;
-
-  const currentPercent = latest?.percent ?? 0;
-  const now = new Date();
-  const dayOfWeek = now.getDay(); // 0 = Sunday
-
-  // Compute weekly percent: estimate based on day of week and current usage
-  // Assuming usage resets weekly, project weekly consumption
-  const daysIntoWeek = dayOfWeek === 0 ? 7 : dayOfWeek;
-  const weeklyPercent = daysIntoWeek > 0
-    ? Math.min(100, (currentPercent / daysIntoWeek) * 7)
-    : currentPercent;
-
-  // Reset day: assume Monday (1)
-  const resetDay = 1;
-
-  const trend = getUsageTrend(6);
-
-  return {
-    currentPercent,
-    weeklyPercent,
-    dayOfWeek,
-    resetDay,
-    trend,
-  };
+  try {
+    db.prepare(`
+      INSERT INTO usage_snapshots (timestamp, percent, model, raw_output)
+      VALUES (?, ?, ?, '')
+    `).run(Date.now(), percent, model);
+  } catch {
+    // Non-critical
+  }
 }
 
 /**
  * Determine usage trend over the last N hours.
- * Compares the average of the first half of snapshots to the second half.
  */
 export function getUsageTrend(hours: number): 'rising' | 'stable' | 'falling' {
   const db = getDatabase();
@@ -89,13 +222,7 @@ export function getUsageTrend(hours: number): 'rising' | 'stable' | 'falling' {
 
   const diff = avgSecond - avgFirst;
 
-  // Use a threshold to determine significant change
-  if (diff > 2) {
-    return 'rising';
-  }
-  if (diff < -2) {
-    return 'falling';
-  }
-
+  if (diff > 2) return 'rising';
+  if (diff < -2) return 'falling';
   return 'stable';
 }

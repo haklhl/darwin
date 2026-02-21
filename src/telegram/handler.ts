@@ -8,8 +8,7 @@ import { isAgentLoopBusy } from '../agent/loop.js';
 import { checkSurvivalState } from '../survival/monitor.js';
 import { loadSoul } from '../soul/model.js';
 import { getLatestMetrics } from '../observability/metrics.js';
-import { getLatestUsage, getUsageTrend } from '../inference/usage-tracker.js';
-import { checkUsage } from '../inference/claude-cli.js';
+import { getLatestUsage } from '../inference/usage-tracker.js';
 import { selectModel } from '../inference/model-strategy.js';
 import { getDatabase, insertInboxMessage, insertWakeEvent, isEmergencyStopped, setEmergencyStop, kvGet, kvSet } from '../state/database.js';
 
@@ -135,24 +134,28 @@ async function handleCommand(chatId: number, text: string): Promise<void> {
 
     case '/usage': {
       try {
-        const liveUsage = await checkUsage();
-        const cached = getLatestUsage();
-        const trend = cached.trend;
-        const model = selectModel(cached, 'conversation');
+        const usage = getLatestUsage();
+        const model = selectModel(usage, 'conversation');
 
-        let usageMsg = '📊 CLI Usage\n─────────────────\n';
-        if (liveUsage.percentUsed >= 0) {
-          usageMsg += `当前用量: ${liveUsage.percentUsed.toFixed(1)}%\n`;
-        } else {
-          usageMsg += `当前用量: 无法获取\n`;
-        }
-        usageMsg += `趋势: ${trend === 'rising' ? '📈 上升' : trend === 'falling' ? '📉 下降' : '➡️ 稳定'}\n`;
-        usageMsg += `周预估: ${cached.weeklyPercent.toFixed(1)}%\n`;
-        usageMsg += `当前模型: ${model.toUpperCase()}\n`;
+        const fmt = (n: number) => {
+          if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+          if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+          return String(n);
+        };
 
-        const dayNames = ['日', '一', '二', '三', '四', '五', '六'];
-        usageMsg += `重置日: 周${dayNames[cached.resetDay]}\n`;
-        usageMsg += `今天: 周${dayNames[cached.dayOfWeek]}`;
+        const bar = (pct: number) => {
+          const filled = Math.round(pct / 10);
+          return '█'.repeat(filled) + '░'.repeat(10 - filled);
+        };
+
+        let usageMsg = '📊 Usage Report\n─────────────────\n';
+        usageMsg += `Session (5h):\n  ${bar(usage.sessionPercent)} ${usage.sessionPercent.toFixed(1)}% (${fmt(usage.sessionTokens)} tokens)\n\n`;
+        usageMsg += `Weekly All Models:\n  ${bar(usage.weeklyAllPercent)} ${usage.weeklyAllPercent.toFixed(1)}% (${fmt(usage.weeklyAllTokens)} tokens)\n`;
+        usageMsg += `  Resets Sat 23:00 UTC\n\n`;
+        usageMsg += `Weekly Sonnet Only:\n  ${bar(usage.weeklySonnetPercent)} ${usage.weeklySonnetPercent.toFixed(1)}% (${fmt(usage.weeklySonnetTokens)} tokens)\n`;
+        usageMsg += `  Resets Sat 23:00 UTC\n\n`;
+        usageMsg += `趋势: ${usage.trend === 'rising' ? '📈 上升' : usage.trend === 'falling' ? '📉 下降' : '➡️ 稳定'}\n`;
+        usageMsg += `当前模型: ${model.toUpperCase()}`;
 
         await sendMessage(chatId, usageMsg);
       } catch {

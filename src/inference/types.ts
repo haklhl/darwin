@@ -16,6 +16,15 @@ export interface InferenceResult {
   model: string;
   durationMs: number;
   error?: string;
+  /** Token usage from this call (parsed from CLI JSON response) */
+  tokenUsage?: TokenUsage;
+}
+
+export interface TokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
 }
 
 export interface UsageInfo {

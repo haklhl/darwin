@@ -4,7 +4,8 @@
 
 import { spawn } from 'child_process';
 import { logger } from '../observability/logger.js';
-import type { InferenceRequest, InferenceResult, UsageInfo } from './types.js';
+import { recordCallUsage } from './usage-tracker.js';
+import type { InferenceRequest, InferenceResult, UsageInfo, TokenUsage } from './types.js';
 
 const MODEL_MAP: Record<string, string> = {
   opus: 'claude-opus-4-6',
@@ -50,9 +51,36 @@ export async function callClaude(request: InferenceRequest): Promise<InferenceRe
 
     // Attempt to parse JSON response
     let content: string;
+    let tokenUsage: TokenUsage | undefined;
     try {
-      const parsed = JSON.parse(result) as { result?: string; content?: string; response?: string };
-      content = parsed.result ?? parsed.content ?? parsed.response ?? result;
+      const parsed = JSON.parse(result) as Record<string, unknown>;
+      content = (parsed.result ?? parsed.content ?? parsed.response ?? result) as string;
+
+      // Extract token usage from CLI JSON response
+      const usage = parsed.usage as Record<string, unknown> | undefined;
+      if (usage) {
+        tokenUsage = {
+          inputTokens: (usage.input_tokens as number) ?? 0,
+          outputTokens: (usage.output_tokens as number) ?? 0,
+          cacheCreationTokens: (usage.cache_creation_input_tokens as number) ?? 0,
+          cacheReadTokens: (usage.cache_read_input_tokens as number) ?? 0,
+        };
+
+        // Record usage for tracking (determine actual model from modelUsage or request)
+        const modelUsage = parsed.modelUsage as Record<string, unknown> | undefined;
+        let actualModel = request.model ?? 'sonnet';
+        if (modelUsage) {
+          const modelKeys = Object.keys(modelUsage);
+          if (modelKeys.length > 0) {
+            const key = modelKeys[0];
+            if (key.includes('opus')) actualModel = 'opus';
+            else if (key.includes('haiku')) actualModel = 'haiku';
+            else actualModel = 'sonnet';
+          }
+        }
+
+        recordCallUsage(actualModel, tokenUsage);
+      }
     } catch {
       // If not valid JSON, use raw output
       content = result;
@@ -62,12 +90,14 @@ export async function callClaude(request: InferenceRequest): Promise<InferenceRe
       model: request.model ?? 'default',
       durationMs,
       responseLength: content.length,
+      tokens: tokenUsage ? tokenUsage.inputTokens + tokenUsage.outputTokens : undefined,
     });
 
     return {
       content,
       model: request.model ?? 'sonnet',
       durationMs,
+      tokenUsage,
     };
   } catch (error) {
     const durationMs = Date.now() - startTime;
@@ -85,43 +115,31 @@ export async function callClaude(request: InferenceRequest): Promise<InferenceRe
 }
 
 /**
- * Get CLI usage estimate based on internal tracking.
- * Claude CLI has no external usage-check command, so we estimate
- * from our own call counts and the known weekly Pro limit (~45h compute).
+ * Get CLI usage based on tracked token consumption.
+ * Returns the highest usage percentage across all 3 windows.
  */
 export async function checkUsage(): Promise<UsageInfo> {
   try {
-    const db = (await import('../state/database.js')).getDatabase();
+    const { getLatestUsage } = await import('./usage-tracker.js');
+    const usage = getLatestUsage();
+    const maxPercent = Math.max(usage.sessionPercent, usage.weeklyAllPercent, usage.weeklySonnetPercent);
 
-    // Count agent loop runs in the current week
-    const now = Date.now();
-    const dayOfWeek = new Date().getDay();
-    const daysSinceMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
-    const weekStart = now - daysSinceMonday * 86_400_000;
+    const rawOutput = [
+      `Session (5h): ${formatTokens(usage.sessionTokens)} (${usage.sessionPercent.toFixed(1)}%)`,
+      `Weekly All: ${formatTokens(usage.weeklyAllTokens)} (${usage.weeklyAllPercent.toFixed(1)}%)`,
+      `Weekly Sonnet: ${formatTokens(usage.weeklySonnetTokens)} (${usage.weeklySonnetPercent.toFixed(1)}%)`,
+    ].join(' | ');
 
-    const row = db.prepare(`
-      SELECT COUNT(*) as cnt FROM heartbeat_log
-      WHERE task_name = 'agent_loop' AND started_at > ?
-    `).get(weekStart) as { cnt: number } | undefined;
-
-    const loopCount = row?.cnt ?? 0;
-
-    // Rough estimate: each agent loop ~2-5 min compute, Pro plan ~45h/week = 2700 min
-    // Conservative: assume 3 min avg per loop
-    const estimatedMinutes = loopCount * 3;
-    const weeklyLimitMinutes = 2700;
-    const percentUsed = Math.min(100, (estimatedMinutes / weeklyLimitMinutes) * 100);
-
-    logger.info('claude-cli', 'Usage estimate computed', { loopCount, percentUsed: percentUsed.toFixed(1) });
+    logger.info('claude-cli', 'Usage check', { session: usage.sessionPercent, weeklyAll: usage.weeklyAllPercent, weeklySonnet: usage.weeklySonnetPercent });
 
     return {
-      percentUsed,
-      rawOutput: `Estimated: ${loopCount} loops this week, ~${estimatedMinutes} min / ${weeklyLimitMinutes} min (${percentUsed.toFixed(1)}%)`,
-      timestamp: now,
+      percentUsed: maxPercent,
+      rawOutput,
+      timestamp: Date.now(),
     };
   } catch (error) {
     const errMsg = error instanceof Error ? error.message : String(error);
-    logger.error('claude-cli', 'Usage estimate failed', { error: errMsg });
+    logger.error('claude-cli', 'Usage check failed', { error: errMsg });
 
     return {
       percentUsed: -1,
@@ -129,6 +147,12 @@ export async function checkUsage(): Promise<UsageInfo> {
       timestamp: Date.now(),
     };
   }
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
 }
 
 /**

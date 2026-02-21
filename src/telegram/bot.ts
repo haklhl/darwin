@@ -127,6 +127,7 @@ export function startTypingIndicator(chatId: string | number): () => void {
 export async function registerCommands(): Promise<void> {
   if (!botToken) return;
   const commands = [
+    { command: 'start', description: '开始 / 欢迎信息' },
     { command: 'status', description: '系统状态概览' },
     { command: 'balance', description: '查看钱包余额' },
     { command: 'usage', description: '查看 CLI 用量' },

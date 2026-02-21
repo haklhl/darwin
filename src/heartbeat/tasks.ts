@@ -5,8 +5,7 @@
 import { getDatabase, kvSet, kvGet, insertWakeEvent } from '../state/database.js';
 import { logger } from '../observability/logger.js';
 import { sendPeriodicReport } from '../telegram/reporter.js';
-import { checkUsage } from '../inference/claude-cli.js';
-import { recordUsageSnapshot } from '../inference/usage-tracker.js';
+import { getLatestUsage } from '../inference/usage-tracker.js';
 import { checkSurvivalState } from '../survival/monitor.js';
 
 const MODULE = 'heartbeat-tasks';
@@ -92,19 +91,24 @@ export async function soulReflection(): Promise<HeartbeatTaskResult> {
   return { shouldWake: false };
 }
 
-/** Check Claude CLI usage and record snapshot. */
+/** Check Claude CLI usage levels. */
 export async function checkCliUsage(): Promise<HeartbeatTaskResult> {
   logger.info(MODULE, 'Checking CLI usage');
   try {
-    const usage = await checkUsage();
-    if (usage.percentUsed >= 0) {
-      recordUsageSnapshot(usage.percentUsed, 'cli', usage.rawOutput);
-      logger.info(MODULE, 'CLI usage recorded', { percent: usage.percentUsed });
+    const usage = getLatestUsage();
+    const maxPercent = Math.max(usage.sessionPercent, usage.weeklyAllPercent, usage.weeklySonnetPercent);
 
-      // Wake if usage is critically high
-      if (usage.percentUsed > 90) {
-        return { shouldWake: true, message: `CLI 用量过高: ${usage.percentUsed.toFixed(1)}%，需要节流` };
-      }
+    logger.info(MODULE, 'CLI usage levels', {
+      session: usage.sessionPercent.toFixed(1),
+      weeklyAll: usage.weeklyAllPercent.toFixed(1),
+      weeklySonnet: usage.weeklySonnetPercent.toFixed(1),
+    });
+
+    // Wake if any window is critically high
+    if (maxPercent > 90) {
+      const which = usage.sessionPercent > 90 ? 'Session' :
+                    usage.weeklyAllPercent > 90 ? 'Weekly All' : 'Weekly Sonnet';
+      return { shouldWake: true, message: `CLI 用量过高: ${which} ${maxPercent.toFixed(1)}%，需要切换模型节流` };
     }
   } catch (error) {
     logger.warn(MODULE, 'Failed to check CLI usage', { error: error instanceof Error ? error.message : String(error) });
