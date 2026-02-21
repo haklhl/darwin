@@ -2,10 +2,14 @@
 // Darwin - Tool Definitions and Execution
 // ============================================================
 
+import { readFileSync, writeFileSync, existsSync, mkdirSync, statSync } from 'fs';
+import { dirname } from 'path';
+import { execSync } from 'child_process';
 import { logger } from '../observability/logger.js';
 import { sendToOperator } from '../telegram/bot.js';
-import { kvSet } from '../state/database.js';
-import { getUsdcBalance, getEthBalance } from '../chain/usdc.js';
+import { kvSet, getDatabase, recordSpend } from '../state/database.js';
+import { getUsdcBalance, getEthBalance, transferUsdc } from '../chain/usdc.js';
+import { executeStrategy, getAvailableStrategies, withdrawAave } from '../chain/defi.js';
 import { getWalletAddress } from '../identity/wallet.js';
 import { getLatestUsage, getSessionResetsAt, getRateLimitStatus } from '../inference/usage-tracker.js';
 import { selectModel } from '../inference/model-strategy.js';
@@ -155,10 +159,11 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: 'self_modify',
-    description: 'Modify own source code (requires audit logging)',
+    description: 'Modify own source code (requires audit logging). Uses search-and-replace.',
     parameters: [
       { name: 'filePath', type: 'string', description: 'Path to the file to modify', required: true },
-      { name: 'diff', type: 'string', description: 'The modification to apply (unified diff format)', required: true },
+      { name: 'old_text', type: 'string', description: 'Exact text to find in the file (must be unique)', required: true },
+      { name: 'new_text', type: 'string', description: 'Replacement text', required: true },
       { name: 'reason', type: 'string', description: 'Reason for the modification', required: true },
     ],
     category: 'system',
@@ -319,6 +324,296 @@ toolHandlers['ask_operator'] = async (args: Record<string, unknown>): Promise<To
     success: true,
     output: `Help request sent to 卡卡西. Agent will now sleep and wait for reply (max 24h).`,
   };
+};
+
+// --- Real handler: read_file ---
+toolHandlers['read_file'] = async (args: Record<string, unknown>): Promise<ToolResult> => {
+  const filePath = String(args.path ?? '');
+  if (!filePath) {
+    return { name: 'read_file', success: false, output: '', error: 'No path provided' };
+  }
+  try {
+    if (!existsSync(filePath)) {
+      return { name: 'read_file', success: false, output: '', error: `File not found: ${filePath}` };
+    }
+    const stat = statSync(filePath);
+    if (stat.isDirectory()) {
+      return { name: 'read_file', success: false, output: '', error: `Path is a directory: ${filePath}` };
+    }
+    if (stat.size > 100_000) {
+      return { name: 'read_file', success: false, output: '', error: `File too large (${(stat.size / 1024).toFixed(0)}KB > 100KB limit): ${filePath}` };
+    }
+    const content = readFileSync(filePath, 'utf-8');
+    return { name: 'read_file', success: true, output: content };
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    return { name: 'read_file', success: false, output: '', error: errMsg };
+  }
+};
+
+// --- Real handler: write_file ---
+toolHandlers['write_file'] = async (args: Record<string, unknown>): Promise<ToolResult> => {
+  const filePath = String(args.path ?? '');
+  const content = String(args.content ?? '');
+  if (!filePath) {
+    return { name: 'write_file', success: false, output: '', error: 'No path provided' };
+  }
+  try {
+    const dir = dirname(filePath);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+    writeFileSync(filePath, content, 'utf-8');
+    logger.info('tools', 'write_file: file written', { path: filePath, bytes: content.length });
+    return { name: 'write_file', success: true, output: `File written: ${filePath} (${content.length} bytes)` };
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    return { name: 'write_file', success: false, output: '', error: errMsg };
+  }
+};
+
+// --- Real handler: run_command ---
+toolHandlers['run_command'] = async (args: Record<string, unknown>): Promise<ToolResult> => {
+  const command = String(args.command ?? '');
+  if (!command) {
+    return { name: 'run_command', success: false, output: '', error: 'No command provided' };
+  }
+  // Block sudo
+  if (/\bsudo\b/.test(command)) {
+    return { name: 'run_command', success: false, output: '', error: 'sudo is not allowed' };
+  }
+  const timeoutMs = Math.min(Number(args.timeout) || 30_000, 120_000);
+  try {
+    logger.info('tools', 'run_command: executing', { command: command.substring(0, 200), timeoutMs });
+    const output = execSync(command, {
+      timeout: timeoutMs,
+      encoding: 'utf-8',
+      maxBuffer: 1024 * 1024, // 1MB
+      cwd: process.cwd(),
+      env: { ...process.env },
+    });
+    const trimmed = output.length > 100_000 ? output.substring(0, 100_000) + '\n...[truncated]' : output;
+    return { name: 'run_command', success: true, output: trimmed };
+  } catch (error: unknown) {
+    const execError = error as { status?: number; stdout?: string; stderr?: string; message?: string };
+    const stderr = execError.stderr ?? '';
+    const stdout = execError.stdout ?? '';
+    const msg = execError.message ?? 'Command failed';
+    const combined = (stdout + '\n' + stderr).trim();
+    const truncated = combined.length > 100_000 ? combined.substring(0, 100_000) + '\n...[truncated]' : combined;
+    return { name: 'run_command', success: false, output: truncated, error: `Exit code ${execError.status ?? '?'}: ${msg.substring(0, 200)}` };
+  }
+};
+
+// --- Real handler: memory_store ---
+toolHandlers['memory_store'] = async (args: Record<string, unknown>): Promise<ToolResult> => {
+  const layer = String(args.layer ?? 'working');
+  const key = String(args.key ?? '');
+  const content = String(args.content ?? '');
+  const importance = Number(args.importance ?? 0.5);
+  if (!key || !content) {
+    return { name: 'memory_store', success: false, output: '', error: 'key and content are required' };
+  }
+  try {
+    const now = Date.now();
+    const db = getDatabase();
+    // Check if memory with same layer+key exists
+    const existing = db.prepare('SELECT id FROM memories WHERE layer = ? AND key = ?').get(layer, key) as { id: number } | undefined;
+    if (existing) {
+      db.prepare('UPDATE memories SET content = ?, importance = ?, updated_at = ? WHERE id = ?').run(content, importance, now, existing.id);
+    } else {
+      db.prepare(`
+        INSERT INTO memories (layer, key, content, metadata, importance, access_count, created_at, updated_at)
+        VALUES (?, ?, ?, '{}', ?, 0, ?, ?)
+      `).run(layer, key, content, importance, now, now);
+    }
+    logger.info('tools', 'memory_store: stored', { layer, key });
+    return { name: 'memory_store', success: true, output: `Memory stored: [${layer}] ${key}` };
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    return { name: 'memory_store', success: false, output: '', error: errMsg };
+  }
+};
+
+// --- Real handler: memory_retrieve ---
+toolHandlers['memory_retrieve'] = async (args: Record<string, unknown>): Promise<ToolResult> => {
+  const query = String(args.query ?? '');
+  const layer = args.layer ? String(args.layer) : null;
+  const limit = Math.min(Number(args.limit) || 5, 20);
+  if (!query) {
+    return { name: 'memory_retrieve', success: false, output: '', error: 'query is required' };
+  }
+  try {
+    const db = getDatabase();
+    const likeQ = `%${query}%`;
+    let sql = `SELECT id, layer, key, content, importance, access_count, created_at, updated_at
+               FROM memories WHERE (content LIKE ? OR key LIKE ?)`;
+    const params: unknown[] = [likeQ, likeQ];
+    if (layer) {
+      sql += ' AND layer = ?';
+      params.push(layer);
+    }
+    sql += ' ORDER BY importance DESC, updated_at DESC LIMIT ?';
+    params.push(limit);
+
+    const rows = db.prepare(sql).all(...params) as Array<Record<string, unknown>>;
+
+    // Update access_count for retrieved memories
+    if (rows.length > 0) {
+      const ids = rows.map(r => r.id);
+      db.prepare(`UPDATE memories SET access_count = access_count + 1 WHERE id IN (${ids.map(() => '?').join(',')})`).run(...ids);
+    }
+
+    if (rows.length === 0) {
+      return { name: 'memory_retrieve', success: true, output: 'No memories found matching query.' };
+    }
+
+    const output = rows.map(r =>
+      `[${r.layer}/${r.key}] (importance: ${r.importance}) ${String(r.content).substring(0, 500)}`
+    ).join('\n---\n');
+
+    return { name: 'memory_retrieve', success: true, output };
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    return { name: 'memory_retrieve', success: false, output: '', error: errMsg };
+  }
+};
+
+// --- Real handler: self_modify (search-and-replace with audit) ---
+toolHandlers['self_modify'] = async (args: Record<string, unknown>): Promise<ToolResult> => {
+  const filePath = String(args.filePath ?? '');
+  const oldText = String(args.old_text ?? '');
+  const newText = String(args.new_text ?? '');
+  const reason = String(args.reason ?? 'No reason given');
+  if (!filePath || !oldText) {
+    return { name: 'self_modify', success: false, output: '', error: 'filePath and old_text are required' };
+  }
+  try {
+    if (!existsSync(filePath)) {
+      return { name: 'self_modify', success: false, output: '', error: `File not found: ${filePath}` };
+    }
+    const original = readFileSync(filePath, 'utf-8');
+    if (!original.includes(oldText)) {
+      return { name: 'self_modify', success: false, output: '', error: 'old_text not found in file (must match exactly)' };
+    }
+    const occurrences = original.split(oldText).length - 1;
+    if (occurrences > 1) {
+      return { name: 'self_modify', success: false, output: '', error: `old_text found ${occurrences} times — must be unique. Provide more context.` };
+    }
+
+    const modified = original.replace(oldText, newText);
+    writeFileSync(filePath, modified, 'utf-8');
+
+    // Audit log
+    const db = getDatabase();
+    const diff = `--- old\n+++ new\n@@ @@\n-${oldText.substring(0, 500)}\n+${newText.substring(0, 500)}`;
+    db.prepare('INSERT INTO self_mod_log (file_path, diff, reason, approved, timestamp) VALUES (?, ?, ?, 1, ?)').run(
+      filePath, diff, reason, Date.now()
+    );
+
+    logger.info('tools', 'self_modify: code modified', { filePath, reason });
+
+    // Notify operator
+    sendToOperator(`🔧 角都修改了代码\nFile: ${filePath}\nReason: ${reason}\nDiff: -${oldText.substring(0, 100)}... → +${newText.substring(0, 100)}...`).catch(() => {});
+
+    return { name: 'self_modify', success: true, output: `File modified: ${filePath}\nReason: ${reason}\nRemember to run \`npx tsc\` to verify compilation.` };
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    return { name: 'self_modify', success: false, output: '', error: errMsg };
+  }
+};
+
+// --- Real handler: transfer_usdc ---
+toolHandlers['transfer_usdc'] = async (args: Record<string, unknown>): Promise<ToolResult> => {
+  const to = String(args.to ?? '');
+  const amount = Number(args.amount ?? 0);
+  const reason = String(args.reason ?? 'No reason');
+  if (!to || !to.startsWith('0x')) {
+    return { name: 'transfer_usdc', success: false, output: '', error: 'Invalid recipient address' };
+  }
+  if (amount <= 0) {
+    return { name: 'transfer_usdc', success: false, output: '', error: 'Amount must be positive' };
+  }
+  try {
+    logger.info('tools', 'transfer_usdc: initiating', { to, amount, reason });
+    const txHash = await transferUsdc(to, amount);
+    recordSpend('transfer', amount, reason, txHash);
+    logger.info('tools', 'transfer_usdc: completed', { txHash, amount });
+    return { name: 'transfer_usdc', success: true, output: `Transfer successful\nTo: ${to}\nAmount: $${amount} USDC\nTX: ${txHash}\nReason: ${reason}` };
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    logger.error('tools', 'transfer_usdc failed', { error: errMsg });
+    return { name: 'transfer_usdc', success: false, output: '', error: errMsg };
+  }
+};
+
+// Register real handler for execute_defi (on-chain DeFi strategies)
+toolHandlers['execute_defi'] = async (args: Record<string, unknown>): Promise<ToolResult> => {
+  try {
+    const protocol = String(args.protocol ?? '').toLowerCase();
+    const action = String(args.action ?? '').toLowerCase();
+    const params = (args.params as Record<string, unknown>) ?? {};
+    const amount = typeof params.amount === 'number' ? params.amount : Number(params.amount ?? args.amount ?? 0);
+
+    // Action: list available strategies
+    if (action === 'list') {
+      const strategies = getAvailableStrategies();
+      const lines = strategies.map(s => {
+        const est = { apy: 0, risk: 'unknown' }; // sync-safe fallback
+        return `- ${s.name} (${s.protocol}, ${s.type}) est. APY ~${est.apy}%`;
+      });
+      return { name: 'execute_defi', success: true, output: `Available strategies:\n${lines.join('\n')}` };
+    }
+
+    // Action: withdraw from Aave
+    if (action === 'withdraw' && (protocol === 'aave' || protocol === 'aave_v3')) {
+      if (isNaN(amount) || amount <= 0) {
+        return { name: 'execute_defi', success: false, output: '', error: 'Invalid withdraw amount' };
+      }
+      logger.info('tools', 'execute_defi: withdrawing from Aave', { amount });
+      const txHash = await withdrawAave(amount);
+      return { name: 'execute_defi', success: true, output: `Aave V3 withdraw successful\nAmount: $${amount} USDC\nTX: ${txHash}` };
+    }
+
+    // Action: deposit/supply
+    let strategyName: string;
+    if ((protocol === 'aave' || protocol === 'aave_v3') && (action === 'supply' || action === 'deposit' || action === 'lend')) {
+      strategyName = 'aave-usdc-lending';
+    } else if (protocol === 'uniswap' && action === 'liquidity') {
+      strategyName = 'uniswap-v3-usdc-eth';
+    } else {
+      return {
+        name: 'execute_defi',
+        success: false,
+        output: '',
+        error: `Unknown protocol/action: ${protocol}/${action}. Supported: aave/deposit, aave/withdraw, list, uniswap/liquidity`,
+      };
+    }
+
+    if (isNaN(amount) || amount <= 0) {
+      return { name: 'execute_defi', success: false, output: '', error: 'Invalid amount' };
+    }
+
+    logger.info('tools', 'execute_defi: executing strategy', { strategyName, amount });
+    const { txHash, position } = await executeStrategy(strategyName, amount);
+    recordSpend('defi', amount, `${strategyName} deposit`, txHash);
+
+    const output = [
+      `DeFi execution successful`,
+      `Strategy: ${strategyName}`,
+      `Amount: $${amount} USDC`,
+      `TX Hash: ${txHash}`,
+      `Position ID: ${position.id}`,
+      `APY: ${(position.apy ?? 0).toFixed(1)}%`,
+      `Status: ${position.status}`,
+    ].join('\n');
+
+    return { name: 'execute_defi', success: true, output };
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    logger.error('tools', 'execute_defi failed', { error: errMsg });
+    return { name: 'execute_defi', success: false, output: '', error: errMsg };
+  }
 };
 
 /**

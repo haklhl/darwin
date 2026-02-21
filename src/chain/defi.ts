@@ -5,16 +5,41 @@
 import type { DefiPosition } from '../types.js';
 import { logger } from '../observability/logger.js';
 import { getDatabase } from '../state/database.js';
+import {
+  createWalletClient,
+  http,
+  parseAbi,
+  parseUnits,
+  formatUnits,
+  type Address,
+} from 'viem';
+import { base } from 'viem/chains';
+import { getPublicClient } from './client.js';
+import { getSignerAccount, getWalletAddress } from '../identity/wallet.js';
+import { loadConfig } from '../config.js';
+
+// Aave V3 Pool on Base mainnet
+const AAVE_V3_POOL = '0xA238Dd80C259a72e81d7e4664a9801593F98d1c5' as const;
+
+const AAVE_POOL_ABI = parseAbi([
+  'function supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode)',
+  'function withdraw(address asset, uint256 amount, address to) returns (uint256)',
+]);
+
+const ERC20_APPROVE_ABI = parseAbi([
+  'function approve(address spender, uint256 amount) returns (bool)',
+  'function allowance(address owner, address spender) view returns (uint256)',
+]);
 
 export interface DefiStrategy {
   name: string;
   protocol: string;
   type: string;
-  execute(): Promise<string>;
+  execute(amount: number): Promise<string>;
   estimate(): Promise<{ apy: number; risk: string }>;
 }
 
-// --- Strategy stubs ---
+// --- Aave V3 USDC Lending ---
 
 function createAaveUsdcLending(): DefiStrategy {
   return {
@@ -22,13 +47,67 @@ function createAaveUsdcLending(): DefiStrategy {
     protocol: 'Aave V3',
     type: 'lending',
 
-    async execute(): Promise<string> {
-      logger.info('defi', 'Executing Aave V3 USDC lending strategy', {
+    async execute(amount: number): Promise<string> {
+      logger.info('defi', 'Executing Aave V3 USDC supply', {
         protocol: 'Aave V3',
-        action: 'Supply USDC to Aave V3 lending pool on Base',
+        action: 'supply',
+        amount,
       });
-      // Stub: would call Aave V3 pool contract to supply USDC
-      return '0x' + '0'.repeat(64); // placeholder tx hash
+
+      const config = loadConfig();
+      const account = getSignerAccount();
+      const walletAddress = getWalletAddress() as Address;
+      const publicClient = getPublicClient();
+
+      const walletClient = createWalletClient({
+        account,
+        chain: base,
+        transport: http(config.rpcUrl),
+      });
+
+      const onChainAmount = parseUnits(amount.toString(), 6);
+      const usdcAddress = config.usdcAddress as Address;
+
+      // Step 1: Check and set allowance
+      const allowance = await publicClient.readContract({
+        address: usdcAddress,
+        abi: ERC20_APPROVE_ABI,
+        functionName: 'allowance',
+        args: [walletAddress, AAVE_V3_POOL],
+      });
+
+      if ((allowance as bigint) < onChainAmount) {
+        logger.info('defi', 'Approving USDC for Aave V3 pool', {
+          spender: AAVE_V3_POOL,
+          amount: onChainAmount.toString(),
+        });
+        const approveTx = await walletClient.writeContract({
+          address: usdcAddress,
+          abi: ERC20_APPROVE_ABI,
+          functionName: 'approve',
+          args: [AAVE_V3_POOL, onChainAmount],
+        });
+        logger.info('defi', 'USDC approval submitted', { approveTx });
+        await publicClient.waitForTransactionReceipt({ hash: approveTx });
+        logger.info('defi', 'USDC approval confirmed');
+      } else {
+        logger.info('defi', 'USDC allowance sufficient, skipping approve');
+      }
+
+      // Step 2: Supply USDC to Aave V3
+      logger.info('defi', 'Supplying USDC to Aave V3 pool');
+      const supplyTx = await walletClient.writeContract({
+        address: AAVE_V3_POOL,
+        abi: AAVE_POOL_ABI,
+        functionName: 'supply',
+        args: [usdcAddress, onChainAmount, walletAddress, 0],
+      });
+
+      logger.info('defi', 'Aave V3 supply submitted', { supplyTx, amount });
+      await publicClient.waitForTransactionReceipt({ hash: supplyTx });
+      logger.info('defi', 'Aave V3 supply confirmed', { supplyTx, amount });
+
+      return supplyTx;
     },
 
     async estimate(): Promise<{ apy: number; risk: string }> {
@@ -37,20 +116,16 @@ function createAaveUsdcLending(): DefiStrategy {
   };
 }
 
+// --- Uniswap V3 USDC/ETH LP (stub — requires off-chain tick range calculation) ---
+
 function createUniswapV3Lp(): DefiStrategy {
   return {
     name: 'uniswap-v3-usdc-eth',
     protocol: 'Uniswap V3',
     type: 'liquidity',
 
-    async execute(): Promise<string> {
-      logger.info('defi', 'Executing Uniswap V3 LP strategy', {
-        protocol: 'Uniswap V3',
-        action: 'Provide USDC/ETH liquidity on Uniswap V3 Base',
-        pair: 'USDC/ETH',
-      });
-      // Stub: would mint a Uniswap V3 position with a tight range
-      return '0x' + '1'.repeat(64); // placeholder tx hash
+    async execute(_amount: number): Promise<string> {
+      throw new Error('Uniswap V3 LP requires off-chain tick range calculation. Use Aave V3 lending instead.');
     },
 
     async estimate(): Promise<{ apy: number; risk: string }> {
@@ -88,7 +163,7 @@ export async function executeStrategy(
     risk: estimate.risk,
   });
 
-  const txHash = await strategy.execute();
+  const txHash = await strategy.execute(amount);
   const now = Date.now();
 
   // Record the position in the database
@@ -132,4 +207,62 @@ export async function executeStrategy(
   });
 
   return { txHash, position };
+}
+
+/**
+ * Withdraw USDC from Aave V3 pool.
+ * Amount is in human-readable USDC (e.g. 10 = $10).
+ * Use amount = -1 to withdraw max (type(uint256).max).
+ * Returns the transaction hash.
+ */
+export async function withdrawAave(amount: number): Promise<string> {
+  const config = loadConfig();
+  const account = getSignerAccount();
+  const walletAddress = getWalletAddress() as Address;
+  const publicClient = getPublicClient();
+
+  const walletClient = createWalletClient({
+    account,
+    chain: base,
+    transport: http(config.rpcUrl),
+  });
+
+  const usdcAddress = config.usdcAddress as Address;
+  // Use max uint256 to withdraw all, otherwise parse amount
+  const onChainAmount = amount < 0
+    ? BigInt('0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff')
+    : parseUnits(amount.toString(), 6);
+
+  logger.info('defi', 'Withdrawing USDC from Aave V3', { amount, onChainAmount: onChainAmount.toString() });
+
+  const withdrawTx = await walletClient.writeContract({
+    address: AAVE_V3_POOL,
+    abi: AAVE_POOL_ABI,
+    functionName: 'withdraw',
+    args: [usdcAddress, onChainAmount, walletAddress],
+  });
+
+  logger.info('defi', 'Aave V3 withdraw submitted', { withdrawTx });
+  const receipt = await publicClient.waitForTransactionReceipt({ hash: withdrawTx });
+  logger.info('defi', 'Aave V3 withdraw confirmed', { withdrawTx, status: receipt.status });
+
+  // Update active positions in DB
+  const db = getDatabase();
+  if (amount < 0) {
+    // Withdraw all: close all active Aave positions
+    db.prepare(`UPDATE defi_positions SET status = 'closed', updated_at = ? WHERE protocol = 'Aave V3' AND status = 'active'`).run(Date.now());
+  } else {
+    // Partial withdraw: reduce the most recent active position
+    const pos = db.prepare(`SELECT id, amount_a FROM defi_positions WHERE protocol = 'Aave V3' AND status = 'active' ORDER BY created_at DESC LIMIT 1`).get() as { id: number; amount_a: number } | undefined;
+    if (pos) {
+      const remaining = pos.amount_a - amount;
+      if (remaining <= 0) {
+        db.prepare(`UPDATE defi_positions SET status = 'closed', amount_a = 0, current_value = 0, updated_at = ? WHERE id = ?`).run(Date.now(), pos.id);
+      } else {
+        db.prepare(`UPDATE defi_positions SET amount_a = ?, current_value = ?, updated_at = ? WHERE id = ?`).run(remaining, remaining, Date.now(), pos.id);
+      }
+    }
+  }
+
+  return withdrawTx;
 }
