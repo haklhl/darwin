@@ -156,6 +156,16 @@ export async function autonomousThink(): Promise<HeartbeatTaskResult> {
   };
 }
 
+/** X/Twitter 发帖时间 — 唤醒角都去发推 */
+export async function tweetTime(): Promise<HeartbeatTaskResult> {
+  logger.info(MODULE, 'Tweet time trigger');
+  kvSet('last_tweet_time', String(Date.now()));
+  return {
+    shouldWake: true,
+    message: '发帖时间到了！去 X 上发一条推文，参考你的发帖策略。',
+  };
+}
+
 /** Map a task name to its handler function. */
 export function getTaskHandler(name: string): (() => Promise<HeartbeatTaskResult>) | null {
   const handlers: Record<string, () => Promise<HeartbeatTaskResult>> = {
@@ -171,6 +181,7 @@ export function getTaskHandler(name: string): (() => Promise<HeartbeatTaskResult
     memory_maintenance: memoryMaintenance,
     telegram_report: telegramReport,
     autonomous_think: autonomousThink,
+    tweet_time: tweetTime,
   };
 
   return handlers[name] ?? null;

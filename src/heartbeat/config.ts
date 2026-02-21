@@ -29,5 +29,7 @@ export const DEFAULT_HEARTBEAT_CONFIG: HeartbeatConfig = {
     { name: 'telegram_report', cronExpression: '0 */4 * * *', enabled: true },
     // 自主思考 — 每 30 分钟唤醒角都，让他自主评估和行动
     { name: 'autonomous_think', cronExpression: '*/30 * * * *', enabled: true },
+    // X/Twitter 发帖 — 每 2 小时触发一次，角都自己决定发不发
+    { name: 'tweet_time', cronExpression: '0 */2 * * *', enabled: true },
   ],
 };
