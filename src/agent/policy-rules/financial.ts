@@ -10,6 +10,9 @@ const MAX_SPEND_PER_TX = 20;
 /** Maximum percentage of balance per single transaction */
 const MAX_BALANCE_PERCENT_PER_TX = 0.20;
 
+/** Minimum USDC that must remain in wallet after any spend */
+const MIN_RESERVE_USDC = 10;
+
 /** Financial tools that involve spending */
 const FINANCIAL_TOOLS = new Set(['transfer_usdc', 'execute_defi']);
 
@@ -52,20 +55,21 @@ export function financialRule(ctx: PolicyContext): PolicyRuleResult | null {
     };
   }
 
-  // Check percentage of balance
-  if (ctx.usdcBalance > 0) {
-    const percentOfBalance = amount / ctx.usdcBalance;
-    if (percentOfBalance > MAX_BALANCE_PERCENT_PER_TX) {
-      return {
-        decision: 'deny',
-        reason: `Transaction amount ${amount} USDC is ${(percentOfBalance * 100).toFixed(1)}% of balance, exceeding ${MAX_BALANCE_PERCENT_PER_TX * 100}% limit`,
-        rule: 'financial',
-      };
-    }
-  } else if (amount > 0) {
+  // Check minimum reserve — must keep at least $10 USDC in wallet
+  if (ctx.usdcBalance - amount < MIN_RESERVE_USDC) {
     return {
       decision: 'deny',
-      reason: 'Cannot spend with zero USDC balance',
+      reason: `Transaction would leave $${(ctx.usdcBalance - amount).toFixed(2)} in wallet, below minimum reserve of $${MIN_RESERVE_USDC}. Current balance: $${ctx.usdcBalance.toFixed(2)}`,
+      rule: 'financial',
+    };
+  }
+
+  // Check percentage of balance
+  const percentOfBalance = amount / ctx.usdcBalance;
+  if (percentOfBalance > MAX_BALANCE_PERCENT_PER_TX) {
+    return {
+      decision: 'deny',
+      reason: `Transaction amount ${amount} USDC is ${(percentOfBalance * 100).toFixed(1)}% of balance, exceeding ${MAX_BALANCE_PERCENT_PER_TX * 100}% limit`,
       rule: 'financial',
     };
   }

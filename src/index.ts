@@ -268,9 +268,18 @@ async function handleRun(): Promise<void> {
       let trigger = buildLoopTrigger();
 
       // Run the agent loop
+      const isOperatorMessage = trigger.startsWith('卡卡西发来消息:') || trigger.startsWith('卡卡西回复了');
       logger.info('main', `Running agent loop`, { trigger: trigger.substring(0, 100) });
       const result = await runAgentLoop(trigger, 8);
       logger.info('main', `Agent loop completed: ${result.steps.length} steps`);
+
+      // Route response back to Telegram if triggered by operator message
+      if (isOperatorMessage && result.finalAnswer && !result.finalAnswer.startsWith('[IDLE]') && !result.finalAnswer.startsWith('[ERROR]')) {
+        const reply = result.finalAnswer.length > 4000
+          ? result.finalAnswer.substring(0, 4000) + '...'
+          : result.finalAnswer;
+        await sendToOperator(reply);
+      }
 
       // Check agent state after loop
       const state = getAgentState();
