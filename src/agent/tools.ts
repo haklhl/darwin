@@ -181,11 +181,12 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
 
 function stubHandler(toolName: ToolName): ToolHandler {
   return async (args: Record<string, unknown>): Promise<ToolResult> => {
-    logger.info('tools', `Stub handler called for ${toolName}`, { args });
+    logger.warn('tools', `Stub handler called for ${toolName} — not implemented`, { args });
     return {
       name: toolName,
-      success: true,
-      output: `[STUB] ${toolName} executed with args: ${JSON.stringify(args)}`,
+      success: false,
+      output: '',
+      error: `工具 ${toolName} 尚未实现。请使用 ask_operator 向卡卡西求助，说明你需要这个功能。`,
     };
   };
 }
