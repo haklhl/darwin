@@ -3,7 +3,7 @@
 // ============================================================
 
 import { logger } from '../observability/logger.js';
-import { getDatabase, setAgentState, setSleepUntil } from '../state/database.js';
+import { getDatabase, setAgentState, setSleepUntil, kvGetNumber } from '../state/database.js';
 import { callClaude } from '../inference/claude-cli.js';
 import { selectModel } from '../inference/model-strategy.js';
 import { getLatestUsage } from '../inference/usage-tracker.js';
@@ -427,30 +427,25 @@ function inferTaskType(trigger: string, steps: AgentStep[]): TaskType {
  * TODO: integrate with actual survival module once built.
  */
 function getSurvivalState(): SurvivalState {
-  try {
-    const db = getDatabase();
-    const row = db.prepare(`
-      SELECT usdc_balance, eth_balance, survival_tier
-      FROM metric_snapshots
-      ORDER BY timestamp DESC LIMIT 1
-    `).get() as { usdc_balance: number; eth_balance: number; survival_tier: string } | undefined;
+  // Read from KV store (written by heartbeat checkUsdcBalance task)
+  const usdcStr = kvGetNumber('last_usdc_balance');
+  const ethStr = kvGetNumber('last_eth_balance');
+  const tierStr = (getDatabase().prepare("SELECT value FROM kv_store WHERE key = 'last_survival_tier'").get() as { value: string } | undefined)?.value;
 
-    if (row) {
-      return {
-        tier: (row.survival_tier as SurvivalState['tier']) ?? 'normal',
-        usdcBalance: row.usdc_balance ?? 0,
-        ethBalance: row.eth_balance ?? 0,
-        lastChecked: Date.now(),
-      };
-    }
-  } catch {
-    // Fall through to default
+  if (usdcStr !== null) {
+    return {
+      tier: (tierStr as SurvivalState['tier']) ?? 'normal',
+      usdcBalance: usdcStr,
+      ethBalance: ethStr ?? 0,
+      lastChecked: Date.now(),
+    };
   }
 
+  // Fallback: if KV has no data yet, return safe defaults
   return {
     tier: 'normal',
-    usdcBalance: 0,
-    ethBalance: 0,
+    usdcBalance: 100, // Assume funded until heartbeat confirms
+    ethBalance: 0.01,
     lastChecked: Date.now(),
   };
 }
