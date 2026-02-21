@@ -8,10 +8,10 @@ import type { UsageState } from '../types.js';
 import type { TokenUsage } from './types.js';
 
 // --- Configuration ---
-// Token budgets per window (configurable via KV, these are defaults)
-const DEFAULT_SESSION_BUDGET = 500_000;      // tokens per 5h session
-const DEFAULT_WEEKLY_ALL_BUDGET = 5_000_000; // tokens per week (all models)
-const DEFAULT_WEEKLY_SONNET_BUDGET = 3_000_000; // tokens per week (Sonnet only)
+// Token budgets per window (Max 20x subscription, configurable via KV)
+const DEFAULT_SESSION_BUDGET = 10_000_000;      // 10M tokens per 5h session (20x)
+const DEFAULT_WEEKLY_ALL_BUDGET = 100_000_000;  // 100M tokens per week all models (20x)
+const DEFAULT_WEEKLY_SONNET_BUDGET = 60_000_000; // 60M tokens per week Sonnet only (20x)
 
 const SESSION_WINDOW_MS = 5 * 60 * 60_000; // 5 hours
 
