@@ -4,6 +4,7 @@
 
 import { logger } from '../observability/logger.js';
 import { sendToOperator } from '../telegram/bot.js';
+import { kvSet } from '../state/database.js';
 import type { ToolCall, ToolResult, ToolName } from '../types.js';
 
 export interface ToolParameter {
@@ -158,6 +159,17 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
     ],
     category: 'system',
   },
+  {
+    name: 'ask_operator',
+    description: 'Ask the operator (卡卡西) for help and wait for a reply. Use when you are blocked by something that requires human intervention (API keys, captchas, account registration, decisions). The agent will sleep until the operator replies.',
+    parameters: [
+      { name: 'category', type: 'string', description: 'Category of help needed (api_key, captcha, registration, decision, other)', required: true },
+      { name: 'question', type: 'string', description: 'The specific question or request for the operator', required: true },
+      { name: 'context', type: 'string', description: 'Background context explaining why you need help and what you were trying to do', required: true },
+      { name: 'urgency', type: 'string', description: 'Urgency level: high (blocking critical task), normal (blocking non-critical), low (nice to have)', required: false },
+    ],
+    category: 'network',
+  },
 ];
 
 // --- Stub Handlers ---
@@ -190,6 +202,56 @@ toolHandlers['send_message'] = async (args: Record<string, unknown>): Promise<To
     name: 'send_message',
     success: sent,
     output: sent ? 'Message sent to operator via Telegram' : 'Failed to send message',
+  };
+};
+
+// Register real handler for ask_operator (Telegram + sleep/wait)
+toolHandlers['ask_operator'] = async (args: Record<string, unknown>): Promise<ToolResult> => {
+  const category = String(args.category ?? 'other');
+  const question = String(args.question ?? '');
+  const context = String(args.context ?? '');
+  const urgency = String(args.urgency ?? 'normal');
+
+  if (!question) {
+    return { name: 'ask_operator', success: false, output: '', error: 'No question provided' };
+  }
+
+  const urgencyIcon = urgency === 'high' ? '🔴' : urgency === 'low' ? '🟢' : '🟡';
+
+  const telegramMsg = [
+    `🆘 角都求助 ${urgencyIcon}`,
+    `─────────────────`,
+    `类别: ${category}`,
+    `紧急度: ${urgency}`,
+    ``,
+    `❓ ${question}`,
+    ``,
+    `📋 背景: ${context}`,
+    ``,
+    `💡 请直接回复此消息，角都收到后会自动继续工作。`,
+  ].join('\n');
+
+  const sent = await sendToOperator(telegramMsg);
+  if (!sent) {
+    return { name: 'ask_operator', success: false, output: '', error: 'Failed to send help request via Telegram' };
+  }
+
+  // Store pending state for handler to detect operator reply
+  const pendingData = JSON.stringify({
+    category,
+    question,
+    context,
+    urgency,
+    askedAt: Date.now(),
+  });
+  kvSet('pending_ask_operator', pendingData);
+
+  logger.info('tools', 'ask_operator: help request sent, agent will sleep', { category, urgency });
+
+  return {
+    name: 'ask_operator',
+    success: true,
+    output: `Help request sent to 卡卡西. Agent will now sleep and wait for reply (max 24h).`,
   };
 };
 

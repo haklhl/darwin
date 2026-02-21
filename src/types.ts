@@ -48,7 +48,8 @@ export type ToolName =
   | 'soul_reflect'
   | 'start_service'
   | 'stop_service'
-  | 'check_usage';
+  | 'check_usage'
+  | 'ask_operator';
 
 export interface ToolCall {
   name: ToolName;

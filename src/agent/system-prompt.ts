@@ -130,7 +130,18 @@ function buildToolsBlock(): string {
 | soul_reflect | 自我反思 |
 | check_usage | 查看 CLI 用量 |
 | self_modify | 修改自身代码（需审计）|
-| sleep | 休眠指定分钟数 {"minutes": N} |`;
+| ask_operator | 向卡卡西求助并等待回复（遇到障碍时用）|
+| sleep | 休眠指定分钟数 {"minutes": N} |
+
+### 求助机制 (ask_operator)
+当你遇到**需要人工介入**的障碍时（如需要 API Key、验证码、注册账号、重要决策），使用 ask_operator 工具：
+- \`category\`: 障碍类别（api_key / captcha / registration / decision / other）
+- \`question\`: 具体问题
+- \`context\`: 你在做什么、为什么被卡住
+- \`urgency\`: high（阻塞关键任务）/ normal（阻塞非关键）/ low（有则更好）
+
+调用后你会自动休眠等待卡卡西回复（最长 24 小时）。卡卡西回复后你会被唤醒，回复内容会作为下次触发的上下文。
+**注意：** send_message 是发完即走，ask_operator 是发完等回复。只在真正被卡住时用 ask_operator。`;
 }
 
 function buildGuidelinesBlock(ctx: SystemPromptContext): string {

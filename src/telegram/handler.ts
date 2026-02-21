@@ -11,7 +11,7 @@ import { getLatestMetrics } from '../observability/metrics.js';
 import { getLatestUsage, getUsageTrend } from '../inference/usage-tracker.js';
 import { checkUsage } from '../inference/claude-cli.js';
 import { selectModel } from '../inference/model-strategy.js';
-import { getDatabase, insertInboxMessage, insertWakeEvent, isEmergencyStopped, setEmergencyStop } from '../state/database.js';
+import { getDatabase, insertInboxMessage, insertWakeEvent, isEmergencyStopped, setEmergencyStop, kvGet, kvSet } from '../state/database.js';
 
 const MODULE = 'telegram-handler';
 
@@ -40,6 +40,33 @@ export async function handleTelegramMessage(msg: TelegramMessage): Promise<void>
   if (text.startsWith('/')) {
     await handleCommand(chatId, text);
     return;
+  }
+
+  // Check if there's a pending ask_operator request
+  const pendingAsk = kvGet('pending_ask_operator');
+  if (pendingAsk) {
+    // This reply is the answer to a pending help request
+    try {
+      const askData = JSON.parse(pendingAsk) as { category: string; question: string };
+      kvSet('pending_ask_operator', ''); // Clear pending state
+
+      // Format as operator reply to help request
+      const replyText = `[卡卡西回复了帮助请求]\n类别: ${askData.category}\n原问题: ${askData.question}\n回复: ${text}`;
+      insertInboxMessage(chatId, userId, replyText);
+      insertWakeEvent('operator_reply', `卡卡西回复了求助: ${text.substring(0, 80)}`, {
+        chatId,
+        text,
+        category: askData.category,
+        originalQuestion: askData.question,
+      });
+
+      await sendMessage(chatId, '✅ 收到回复，角都正在醒来继续工作...');
+      logger.info(MODULE, 'Operator replied to ask_operator request', { category: askData.category });
+      return;
+    } catch {
+      // If JSON parse fails, clear and fall through to normal handling
+      kvSet('pending_ask_operator', '');
+    }
   }
 
   // General message → queue to inbox + wake event

@@ -349,6 +349,14 @@ function buildLoopTrigger(): string {
   const messages = getUnprocessedMessages();
   if (messages.length > 0) {
     markMessagesProcessed(messages.map((m) => m.id));
+
+    // Check if any message is an operator reply to ask_operator
+    const helpReply = messages.find((m) => m.text.startsWith('[卡卡西回复了帮助请求]'));
+    if (helpReply) {
+      const allTexts = messages.map((m) => m.text).join('\n');
+      return `卡卡西回复了你之前的求助请求:\n${allTexts}\n\n请根据卡卡西的回复继续之前被中断的工作。`;
+    }
+
     const msgTexts = messages.map((m) => m.text).join('\n');
     return `卡卡西发来消息:\n${msgTexts}\n\n请回复并处理。`;
   }

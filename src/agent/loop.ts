@@ -261,6 +261,20 @@ export async function runAgentLoop(
         };
       }
 
+      // --- ask_operator support: sleep until operator replies (max 24h) ---
+      if (parsed.action.name === 'ask_operator') {
+        const sleepMs = 24 * 60 * 60_000; // 24 hours max
+        setSleepUntil(Date.now() + sleepMs);
+        setAgentState('sleeping');
+        logger.info('agent-loop', 'Agent waiting for operator reply (ask_operator), sleeping up to 24h');
+        finishConversation(conversationId, steps.length, totalTokens);
+        return {
+          steps,
+          finalAnswer: `🆘 角都已向卡卡西发送求助，等待回复中（最长 24 小时）...`,
+          tokensUsed: totalTokens,
+        };
+      }
+
       // --- Idle detection ---
       const didMutate = !READ_ONLY_TOOLS.has(parsed.action.name);
       if (didMutate) {
