@@ -31,6 +31,10 @@ export async function callClaude(request: InferenceRequest): Promise<InferenceRe
 
   const args: string[] = ['--print', '--output-format', 'stream-json', '--verbose'];
 
+  // Control thinking depth: routine tasks use medium effort, complex tasks use high
+  const effort = request.taskType === 'complex_reasoning' ? 'high' : 'medium';
+  args.push('--effort', effort);
+
   if (request.model) {
     const mapped = MODEL_MAP[request.model];
     if (mapped) {
@@ -224,6 +228,7 @@ function spawnClaude(args: string[], stdin: string, timeoutMs: number): Promise<
 
     let stdout = '';
     let stderr = '';
+    let settled = false;
 
     proc.stdout.on('data', (chunk: Buffer) => {
       stdout += chunk.toString();
@@ -234,22 +239,32 @@ function spawnClaude(args: string[], stdin: string, timeoutMs: number): Promise<
     });
 
     const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
       proc.kill('SIGTERM');
+      // Force kill after 5s if SIGTERM didn't work
+      setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 5000);
       reject(new Error(`Claude CLI timed out after ${timeoutMs}ms`));
     }, timeoutMs);
 
     proc.on('close', (code) => {
       clearTimeout(timer);
+      if (settled) return; // Already rejected by timeout or error
+      settled = true;
 
       if (code === 0) {
         resolve(stdout.trim());
       } else {
-        reject(new Error(`Claude CLI exited with code ${code}: ${stderr.trim() || stdout.trim()}`));
+        // Truncate output to avoid huge error messages
+        const output = (stderr.trim() || stdout.trim()).substring(0, 500);
+        reject(new Error(`Claude CLI exited with code ${code}: ${output}`));
       }
     });
 
     proc.on('error', (err) => {
       clearTimeout(timer);
+      if (settled) return;
+      settled = true;
       reject(new Error(`Failed to spawn claude CLI: ${err.message}`));
     });
 

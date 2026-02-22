@@ -31,6 +31,17 @@ const DANGEROUS_PATTERNS: Array<{ pattern: RegExp; description: string }> = [
 ];
 
 /**
+ * Patterns that may leak secrets via command execution.
+ */
+const SECRET_LEAK_PATTERNS: Array<{ pattern: RegExp; description: string }> = [
+  { pattern: /wallet\.json/, description: 'wallet file (private key)' },
+  { pattern: /private[_-]?key/i, description: 'private key file' },
+  { pattern: /x_credentials/i, description: 'X/Twitter credentials' },
+  { pattern: /\.env(\s|$|\.)/, description: 'environment file' },
+  { pattern: /id_rsa|id_ed25519/i, description: 'SSH private key' },
+];
+
+/**
  * Blocked environment variable exposure patterns.
  */
 const ENV_EXPOSURE_PATTERNS: RegExp[] = [
@@ -65,6 +76,17 @@ export function commandSafetyRule(ctx: PolicyContext): PolicyRuleResult | null {
       return {
         decision: 'deny',
         reason: `Dangerous command blocked: ${description}`,
+        rule: 'command-safety',
+      };
+    }
+  }
+
+  // Check secret file access via commands
+  for (const { pattern, description } of SECRET_LEAK_PATTERNS) {
+    if (pattern.test(command)) {
+      return {
+        decision: 'deny',
+        reason: `Command may access sensitive file: ${description}`,
         rule: 'command-safety',
       };
     }

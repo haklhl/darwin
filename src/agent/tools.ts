@@ -7,8 +7,8 @@ import { dirname } from 'path';
 import { execSync } from 'child_process';
 import { logger } from '../observability/logger.js';
 import { sendToOperator } from '../telegram/bot.js';
-import { kvSet, getDatabase, recordSpend } from '../state/database.js';
-import { getUsdcBalance, getEthBalance, transferUsdc } from '../chain/usdc.js';
+import { kvSet, kvGet, getDatabase, recordSpend } from '../state/database.js';
+import { getUsdcBalance, getAaveUsdcBalance, getEthBalance, transferUsdc } from '../chain/usdc.js';
 import { executeStrategy, getAvailableStrategies, withdrawAave } from '../chain/defi.js';
 import { getWalletAddress } from '../identity/wallet.js';
 import { getLatestUsage, getSessionResetsAt, getRateLimitStatus } from '../inference/usage-tracker.js';
@@ -219,19 +219,27 @@ toolHandlers['send_message'] = async (args: Record<string, unknown>): Promise<To
 toolHandlers['check_balance'] = async (_args: Record<string, unknown>): Promise<ToolResult> => {
   try {
     const address = getWalletAddress();
-    const [usdcBalance, ethBalance] = await Promise.all([
+    const [walletUsdc, aaveUsdc, ethBalance] = await Promise.all([
       getUsdcBalance(),
+      getAaveUsdcBalance(),
       getEthBalance(),
     ]);
+    const totalUsdc = walletUsdc + aaveUsdc;
 
     const output = [
       `Wallet: ${address}`,
       `Chain: Base (chainId 8453)`,
-      `USDC: $${usdcBalance.toFixed(2)}`,
+      `--- USDC ---`,
+      `钱包 USDC: $${walletUsdc.toFixed(2)}`,
+      `Aave V3 存款: $${aaveUsdc.toFixed(2)}`,
+      `USDC 总计: $${totalUsdc.toFixed(2)}`,
+      `--- ETH ---`,
       `ETH: ${ethBalance.toFixed(6)}`,
+      `--- 注意 ---`,
+      `钱包至少保留 $10 USDC 作为储备金，不要全部存入 DeFi。`,
     ].join('\n');
 
-    logger.info('tools', 'check_balance: real balance fetched', { usdcBalance, ethBalance });
+    logger.info('tools', 'check_balance: real balance fetched', { walletUsdc, aaveUsdc, totalUsdc, ethBalance });
 
     return { name: 'check_balance', success: true, output };
   } catch (error) {
@@ -548,8 +556,18 @@ toolHandlers['transfer_usdc'] = async (args: Record<string, unknown>): Promise<T
 };
 
 // --- Real handler: post_tweet ---
+const TWEET_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
+
 toolHandlers['post_tweet'] = async (args: Record<string, unknown>): Promise<ToolResult> => {
-  const text = String(args.text ?? '');
+  // Cooldown check: at least 30 min between tweets to avoid X rate limits
+  const lastTweetAt = Number(kvGet('last_tweet_posted_at') ?? '0');
+  const elapsed = Date.now() - lastTweetAt;
+  if (lastTweetAt > 0 && elapsed < TWEET_COOLDOWN_MS) {
+    const waitMin = Math.ceil((TWEET_COOLDOWN_MS - elapsed) / 60000);
+    return { name: 'post_tweet', success: false, output: '', error: `发帖冷却中，还需等待 ${waitMin} 分钟。两条推文间隔至少 30 分钟，避免被风控。` };
+  }
+
+  const text = String(args.text ?? args.content ?? '');
   if (!text) {
     return { name: 'post_tweet', success: false, output: '', error: 'No text provided' };
   }
@@ -558,6 +576,7 @@ toolHandlers['post_tweet'] = async (args: Record<string, unknown>): Promise<Tool
   }
   try {
     const url = await postTweet(text);
+    kvSet('last_tweet_posted_at', String(Date.now()));
     logger.info('tools', 'post_tweet: tweet posted', { url });
     return { name: 'post_tweet', success: true, output: `Tweet posted: ${url}` };
   } catch (error) {
@@ -570,8 +589,11 @@ toolHandlers['post_tweet'] = async (args: Record<string, unknown>): Promise<Tool
 // Register real handler for execute_defi (on-chain DeFi strategies)
 toolHandlers['execute_defi'] = async (args: Record<string, unknown>): Promise<ToolResult> => {
   try {
-    const protocol = String(args.protocol ?? '').toLowerCase();
+    let protocol = String(args.protocol ?? '').toLowerCase();
     const action = String(args.action ?? '').toLowerCase();
+    // Normalize protocol names: "aave-usdc-lending" → "aave", "aave_v3" → "aave", etc.
+    if (protocol.startsWith('aave')) protocol = 'aave';
+    if (protocol.startsWith('uniswap')) protocol = 'uniswap';
     const params = (args.params as Record<string, unknown>) ?? {};
     const amount = typeof params.amount === 'number' ? params.amount : Number(params.amount ?? args.amount ?? 0);
 
