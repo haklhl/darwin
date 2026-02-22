@@ -317,10 +317,10 @@ async function handleRun(): Promise<void> {
         continue;
       }
 
-      // State is 'running' — brief pause then loop again
-      // Default sleep to prevent tight loop; wake events can interrupt
+      // State is 'running' — human-like pause then loop again
+      // Randomized sleep (3-5 min) to avoid bot-like periodic patterns
       setAgentState('sleeping');
-      const defaultSleepMs = 60_000; // 1 minute between autonomous runs
+      const defaultSleepMs = 180_000 + Math.round(Math.random() * 120_000); // 3-5 minutes
       setSleepUntilFn(Date.now() + defaultSleepMs);
       let slept = 0;
       while (slept < defaultSleepMs) {

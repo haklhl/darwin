@@ -101,6 +101,13 @@ export async function runAgentLoop(
   try { // outer try/finally to always release global lock
   try {
     for (let step = 0; step < maxSteps; step++) {
+      // Human-like thinking delay between steps (3-8 seconds)
+      if (step > 0) {
+        const thinkMs = 3000 + Math.random() * 5000;
+        logger.debug('agent-loop', `Thinking pause: ${Math.round(thinkMs / 1000)}s`);
+        await sleep(Math.round(thinkMs));
+      }
+
       // Check throttle
       if (shouldThrottle(usageState.currentPercent)) {
         const delay = getThrottleDelay(usageState.currentPercent);
@@ -135,6 +142,9 @@ export async function runAgentLoop(
       const userMessage = step === 0
         ? `${context}\n\n## Task\n${trigger}`
         : `${context}\n\nContinue with the next step.`;
+
+      // Pre-call jitter: random 1-3s delay to avoid burst patterns
+      await humanDelay(1000, 3000);
 
       // Call Claude
       const result = await callClaude({
@@ -283,7 +293,7 @@ export async function runAgentLoop(
         idleTurnCount++;
         if (idleTurnCount >= MAX_IDLE_TURNS) {
           logger.info('agent-loop', `Idle detected: ${idleTurnCount} read-only turns. Sleeping.`);
-          setSleepUntil(Date.now() + 60_000);
+          setSleepUntil(Date.now() + 180_000 + Math.round(Math.random() * 120_000)); // 3-5 min
           setAgentState('sleeping');
           finishConversation(conversationId, steps.length, totalTokens);
           return {
@@ -543,4 +553,13 @@ function finishConversation(conversationId: number, stepsCount: number, tokensUs
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Random delay to simulate human thinking time.
+ * Adds natural variance to avoid bot-like patterns.
+ */
+function humanDelay(minMs: number, maxMs: number): Promise<void> {
+  const delay = minMs + Math.random() * (maxMs - minMs);
+  return sleep(Math.round(delay));
 }
