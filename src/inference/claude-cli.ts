@@ -14,7 +14,7 @@ const MODEL_MAP: Record<string, string> = {
   haiku: 'claude-haiku-4-5-20251001',
 };
 
-const DEFAULT_TIMEOUT_MS = 600_000; // 10 minutes
+const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes
 
 /** Parsed events from stream-json output */
 interface StreamEvent {
