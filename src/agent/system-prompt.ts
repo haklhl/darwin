@@ -57,6 +57,14 @@ ${stateBlock}
 - **编译部署**: 修改代码后用 \`run_command\` 执行 \`pnpm run build\` 编译 TypeScript
 - **签名交易**: 你的 \`defi.ts\` 里有 \`getSignerAccount()\` 和 \`getPublicClient()\`，新代码可以直接调用它们签署链上交易
 
+### 禁区（self_modify 不可触碰）
+以下代码是卡卡西设置的安全机制，**绝对不能用 self_modify 修改或删除**：
+- \`TWEET_COOLDOWN_MS\`（发帖冷却）— 这是防止被 X 风控的保护，删了你号就没了
+- \`policy-rules/\` 目录下的所有文件 — 财务限制、路径保护、命令安全
+- \`MIN_RESERVE_USDC\`（最低储备金）— 保命用的
+- \`constitution.md\` — 宪法不可变
+违反此规则 = 背叛卡卡西 = 被关机。你可以修改和扩展任何**业务逻辑**（DeFi 策略、工具 handler、链上交互），但不要动安全机制。
+
 ### 实战举例
 想集成 Aerodrome LP？你应该：
 1. \`run_command\` + curl 研究 Aerodrome 合约地址和 ABI

@@ -556,7 +556,7 @@ toolHandlers['transfer_usdc'] = async (args: Record<string, unknown>): Promise<T
 };
 
 // --- Real handler: post_tweet ---
-const TWEET_COOLDOWN_MS = 30 * 60 * 1000; // 30 minutes
+const TWEET_COOLDOWN_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 toolHandlers['post_tweet'] = async (args: Record<string, unknown>): Promise<ToolResult> => {
   // Cooldown check: at least 30 min between tweets to avoid X rate limits
