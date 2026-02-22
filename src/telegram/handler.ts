@@ -4,8 +4,9 @@
 
 import { logger } from '../observability/logger.js';
 import { sendMessage, getOperatorUserId, type TelegramMessage } from './bot.js';
-import { isAgentLoopBusy } from '../agent/loop.js';
+import { isAgentLoopBusy, getCurrentTrigger } from '../agent/loop.js';
 import { checkSurvivalState } from '../survival/monitor.js';
+import { classifyMessage, lightweightChat } from './chat.js';
 import { loadSoul } from '../soul/model.js';
 import { getLatestMetrics } from '../observability/metrics.js';
 import { getLatestUsage, getSessionResetsAt, getRateLimitStatus } from '../inference/usage-tracker.js';
@@ -68,10 +69,24 @@ export async function handleTelegramMessage(msg: TelegramMessage): Promise<void>
     }
   }
 
-  // General message → queue to inbox + wake event
-  insertInboxMessage(chatId, userId, text);
-  insertWakeEvent('telegram', `卡卡西消息: ${text.substring(0, 80)}`, { chatId, text });
-  await sendMessage(chatId, '📨 收到，角都马上处理。');
+  // Classify: simple chat vs needs agent loop
+  const classification = classifyMessage(text);
+
+  if (classification === 'chat') {
+    // Lightweight path — direct haiku response, no agent loop
+    await lightweightChat(chatId, text);
+  } else {
+    // Full agent path — queue for main loop
+    insertInboxMessage(chatId, userId, text);
+    insertWakeEvent('telegram', `卡卡西消息: ${text.substring(0, 80)}`, { chatId, text });
+
+    if (isAgentLoopBusy()) {
+      const trigger = getCurrentTrigger();
+      await sendMessage(chatId, `📨 收到，角都正在忙（${trigger.substring(0, 40)}...），完事后马上处理。`);
+    } else {
+      await sendMessage(chatId, '📨 收到，角都马上处理。');
+    }
+  }
 }
 
 /**

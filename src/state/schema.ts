@@ -217,6 +217,9 @@ export function applySchema(db: Database.Database): void {
 
   // Migration v2: Wake events + Telegram inbox
   applyMigrationV2(db);
+
+  // Migration v3: Chat history for lightweight Telegram chat
+  applyMigrationV3(db);
 }
 
 function applyMigrationV2(db: Database.Database): void {
@@ -250,4 +253,22 @@ function applyMigrationV2(db: Database.Database): void {
   `);
 
   db.prepare('INSERT INTO schema_migrations (version) VALUES (2)').run();
+}
+
+function applyMigrationV3(db: Database.Database): void {
+  const existing = db.prepare('SELECT version FROM schema_migrations WHERE version = 3').get();
+  if (existing) return;
+
+  db.exec(`
+    -- Chat history for lightweight Telegram chat (方案B)
+    CREATE TABLE IF NOT EXISTS chat_history (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
+      content TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_chat_history_time ON chat_history(created_at DESC);
+  `);
+
+  db.prepare('INSERT INTO schema_migrations (version) VALUES (3)').run();
 }

@@ -207,3 +207,39 @@ export function markMessagesProcessed(ids: number[]): void {
     `UPDATE telegram_inbox SET processed = 1 WHERE id IN (${placeholders})`,
   ).run(...ids);
 }
+
+// --- Chat History (方案B: lightweight Telegram chat) ---
+
+export interface ChatMessage {
+  id: number;
+  role: 'user' | 'assistant';
+  content: string;
+  createdAt: number;
+}
+
+export function insertChatMessage(role: 'user' | 'assistant', content: string): void {
+  getDatabase().prepare(
+    'INSERT INTO chat_history (role, content, created_at) VALUES (?, ?, ?)',
+  ).run(role, content, Date.now());
+}
+
+export function getRecentChat(limit: number = 10): ChatMessage[] {
+  const rows = getDatabase().prepare(
+    'SELECT id, role, content, created_at FROM chat_history ORDER BY created_at DESC LIMIT ?',
+  ).all(limit) as Array<Record<string, unknown>>;
+
+  return rows.reverse().map((r) => ({
+    id: r.id as number,
+    role: r.role as 'user' | 'assistant',
+    content: r.content as string,
+    createdAt: r.created_at as number,
+  }));
+}
+
+export function pruneChatHistory(keepCount: number = 50): void {
+  getDatabase().prepare(`
+    DELETE FROM chat_history WHERE id NOT IN (
+      SELECT id FROM chat_history ORDER BY created_at DESC LIMIT ?
+    )
+  `).run(keepCount);
+}
